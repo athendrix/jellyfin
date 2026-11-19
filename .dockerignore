@@ -1,11 +1,6 @@
-.git
-.dockerignore
-Dockerfile
-Dockerfile.arm
-Dockerfile.arm64
-CONTRIBUTORS.md
-README.md
-deployment/*/dist
-deployment/*/pkg-dist
-deployment/collect-dist/
-ci/
+**/bin/
+**/obj/
+**/.vs/
+**/node_modules/
+jellyfin-web-src/dist/
+.git/
