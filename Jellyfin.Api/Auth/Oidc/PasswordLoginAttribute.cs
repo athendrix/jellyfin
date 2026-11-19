@@ -9,7 +9,7 @@ namespace Jellyfin.Api.Auth.Oidc;
 /// Refuses the request when password login is disabled because users log in with OpenID Connect.
 /// </summary>
 /// <remarks>
-/// Applied to every endpoint that logs in with, or recovers, a password. Without it a user created by
+/// Applied to every endpoint that logs in with, changes or recovers a password. Without it a user created by
 /// OpenID Connect, who has no password, could be logged in to with an empty password.
 /// </remarks>
 public sealed class PasswordLoginAttribute : ActionFilterAttribute
@@ -24,7 +24,7 @@ public sealed class PasswordLoginAttribute : ActionFilterAttribute
             {
                 Status = StatusCodes.Status403Forbidden,
                 Title = "Password login is disabled.",
-                Detail = "Log in with single sign-on or Quick Connect."
+                Detail = "Users log in with single sign-on or Quick Connect, and have no password to use or change."
             })
             {
                 StatusCode = StatusCodes.Status403Forbidden

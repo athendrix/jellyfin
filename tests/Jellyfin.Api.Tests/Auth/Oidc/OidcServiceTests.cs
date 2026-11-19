@@ -413,20 +413,38 @@ public sealed class OidcServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Login_LinkedSubjectWithNewUsername_LogsInToTheLinkedAccount()
+    public async Task Login_UsernameClaimChanged_MovesToTheAccountMatchingTheNewName()
     {
-        var username = "alice";
+        // The first login used a claim holding an id, which created an account named after the id.
+        var existing = new User("Andrew", "provider", "reset-provider");
+        _users.Add(existing);
+        var username = "0f8fad5b-d9cb-469f-a165-70867728950e";
         using var service = CreateService(form => CreateIdToken(new Dictionary<string, object> { ["nonce"] = form["nonce"] }, username: username));
 
         var (state, _) = await StartAsync(service);
         await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+        var wrongAccount = _users.Single(u => u.Username == username);
 
-        // The same identity provider account is renamed: it keeps its Jellyfin account rather than getting a new one.
-        username = "alice2";
+        // The claim is fixed: the same identity provider account now logs in to the account with its name.
+        username = "andrew";
         (state, _) = await StartAsync(service);
         await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
 
-        Assert.Equal("alice", Assert.Single(_users).Username);
+        Assert.Equal(2, _users.Count);
+        Assert.Equal(existing.Id, _links.FindUser(OidcLinkStore.Key(Issuer, "subject-1")));
+        Assert.Null(_links.FindKey(wrongAccount.Id));
+    }
+
+    [Fact]
+    public async Task Login_CreatedUser_HasNoLibraryAccess()
+    {
+        using var service = CreateService();
+        var (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        var user = Assert.Single(_users);
+        Assert.False(user.HasPermission(PermissionKind.EnableAllFolders));
+        Assert.Empty(user.GetPreferenceValues<Guid>(PreferenceKind.EnabledFolders));
     }
 
     [Fact]

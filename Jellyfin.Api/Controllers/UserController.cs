@@ -275,6 +275,7 @@ public class UserController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [PasswordLogin]
     public async Task<ActionResult> UpdateUserPassword(
         [FromQuery] Guid? userId,
         [FromBody, Required] UpdateUserPassword request)
@@ -337,6 +338,7 @@ public class UserController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [Obsolete("Kept for backwards compatibility")]
     [ApiExplorerSettings(IgnoreApi = true)]
+    [PasswordLogin]
     public Task<ActionResult> UpdateUserPasswordLegacy(
         [FromRoute, Required] Guid userId,
         [FromBody, Required] UpdateUserPassword request)

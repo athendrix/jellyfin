@@ -77,7 +77,7 @@ public sealed class OidcLinkStore
     }
 
     /// <summary>
-    /// Links a user to an identity provider account.
+    /// Links a user to an identity provider account, unlinking any other user from that account.
     /// </summary>
     /// <param name="userId">The user id.</param>
     /// <param name="key">The identity provider account key.</param>
@@ -85,6 +85,12 @@ public sealed class OidcLinkStore
     {
         lock (_lock)
         {
+            // An identity provider account is linked to one user at a time.
+            foreach (var other in _links.Where(kv => !kv.Key.Equals(userId) && string.Equals(kv.Value, key, StringComparison.Ordinal)).Select(kv => kv.Key).ToList())
+            {
+                _links.Remove(other);
+            }
+
             _links[userId] = key;
             Save();
         }

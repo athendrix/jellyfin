@@ -583,7 +583,7 @@ public sealed class OidcService : IDisposable
         await _userLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            var user = FindLinkedUser(accountKey) ?? await LinkOrCreateUserAsync(username, accountKey).ConfigureAwait(false);
+            var user = await LinkOrCreateUserAsync(username, accountKey).ConfigureAwait(false);
 
             if (user.HasPermission(PermissionKind.IsDisabled))
             {
@@ -617,12 +617,6 @@ public sealed class OidcService : IDisposable
         }
     }
 
-    private User? FindLinkedUser(string accountKey)
-    {
-        var userId = _links.FindUser(accountKey);
-        return userId is null ? null : _userManager.GetUserById(userId.Value);
-    }
-
     private async Task<User> LinkOrCreateUserAsync(string username, string accountKey)
     {
         var user = _userManager.GetUserByName(username);
@@ -636,7 +630,10 @@ public sealed class OidcService : IDisposable
                 throw new OidcException(OidcError.AccessDenied, $"User {username} is linked to another identity provider account.");
             }
 
-            _logger.LogInformation("Linked user {UserName} to identity provider account {Account}.", user.Username, accountKey);
+            if (linkedKey is null)
+            {
+                _logger.LogInformation("Linked user {UserName} to identity provider account {Account}.", user.Username, accountKey);
+            }
         }
         else
         {
@@ -654,7 +651,25 @@ public sealed class OidcService : IDisposable
                 throw new OidcException(OidcError.InvalidUsername, $"'{username}' is not a valid Jellyfin user name.", ex);
             }
 
-            _logger.LogInformation("Created user {UserName} on their first OpenID Connect login.", username);
+            // A new account sees no library until an administrator gives it access to some.
+            user.SetPermission(PermissionKind.EnableAllFolders, false);
+            user.SetPreference(PreferenceKind.EnabledFolders, Array.Empty<Guid>());
+            await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
+
+            _logger.LogInformation("Created user {UserName} on their first OpenID Connect login. It has access to no library yet.", username);
+        }
+
+        // The user name decides the account. The link only stops another identity provider account from taking over
+        // an account that is already linked; an identity provider account whose name changed (or whose user name claim
+        // was reconfigured) moves to the account matching its new name.
+        var previousUserId = _links.FindUser(accountKey);
+        if (previousUserId is not null && !previousUserId.Value.Equals(user.Id))
+        {
+            _logger.LogInformation(
+                "Identity provider account {Account} now logs in to user {UserName} instead of user {PreviousUserId}.",
+                accountKey,
+                user.Username,
+                previousUserId.Value);
         }
 
         _links.Link(user.Id, accountKey);
