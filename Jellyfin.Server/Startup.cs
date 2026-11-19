@@ -17,6 +17,7 @@ using Jellyfin.Networking;
 using Jellyfin.Networking.HappyEyeballs;
 using Jellyfin.Server.Extensions;
 using Jellyfin.Server.HealthChecks;
+using Jellyfin.Server.Helpers;
 using Jellyfin.Server.Implementations.Extensions;
 using Jellyfin.Server.Implementations.Users;
 using MediaBrowser.Common.Net;
@@ -218,10 +219,8 @@ namespace Jellyfin.Server
                         ContentTypeProvider = extensionProvider,
                         OnPrepareResponse = (context) =>
                         {
-                            if (Path.GetFileName(context.File.Name).Equals("index.html", StringComparison.Ordinal))
-                            {
-                                context.Context.Response.Headers.CacheControl = new StringValues("no-cache");
-                            }
+                            context.Context.Response.Headers.CacheControl = new StringValues(
+                                WebClientCachePolicy.GetCacheControl(Path.GetFileName(context.File.Name)));
                         }
                     });
 
