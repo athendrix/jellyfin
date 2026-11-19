@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Json;
@@ -13,6 +14,7 @@ using System.Threading.Tasks;
 using Jellyfin.Data;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Authentication;
 using MediaBrowser.Controller.Library;
@@ -43,7 +45,12 @@ public sealed class OidcService : IDisposable
     /// <summary>
     /// The most logins that may be in progress at once, to bound memory use.
     /// </summary>
-    private const int MaxPendingLogins = 1000;
+    private const int MaxPendingLogins = 10000;
+
+    /// <summary>
+    /// The most logins one address may have in progress at once, so one client cannot block everyone's logins.
+    /// </summary>
+    private const int MaxPendingLoginsPerAddress = 20;
 
     private const int MaxFieldLength = 256;
 
@@ -51,7 +58,10 @@ public sealed class OidcService : IDisposable
     private readonly IUserManager _userManager;
     private readonly ISessionManager _sessionManager;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly INetworkManager _networkManager;
+    private readonly OidcLinkStore _links;
     private readonly ILogger<OidcService> _logger;
+    private readonly Timer _sweepTimer;
     private readonly ConfigurationManager<OpenIdConnectConfiguration>? _configurationManager;
     private readonly HttpClient? _metadataClient;
     private readonly JsonWebTokenHandler _tokenHandler = new();
@@ -67,14 +77,27 @@ public sealed class OidcService : IDisposable
     /// <param name="userManager">The user manager.</param>
     /// <param name="sessionManager">The session manager.</param>
     /// <param name="httpClientFactory">The HTTP client factory.</param>
+    /// <param name="networkManager">The network manager.</param>
+    /// <param name="applicationPaths">The application paths.</param>
     /// <param name="logger">The logger.</param>
     public OidcService(
         OidcSettings settings,
         IUserManager userManager,
         ISessionManager sessionManager,
         IHttpClientFactory httpClientFactory,
+        INetworkManager networkManager,
+        IApplicationPaths applicationPaths,
         ILogger<OidcService> logger)
-        : this(settings, userManager, sessionManager, httpClientFactory, logger, TimeProvider.System, null)
+        : this(
+            settings,
+            userManager,
+            sessionManager,
+            httpClientFactory,
+            networkManager,
+            new OidcLinkStore(Path.Combine(applicationPaths.DataPath, "oidc-links.json"), logger),
+            logger,
+            TimeProvider.System,
+            null)
     {
     }
 
@@ -85,6 +108,8 @@ public sealed class OidcService : IDisposable
     /// <param name="userManager">The user manager.</param>
     /// <param name="sessionManager">The session manager.</param>
     /// <param name="httpClientFactory">The HTTP client factory.</param>
+    /// <param name="networkManager">The network manager.</param>
+    /// <param name="links">The account links.</param>
     /// <param name="logger">The logger.</param>
     /// <param name="timeProvider">The time provider.</param>
     /// <param name="configurationManager">The provider metadata source, or null to fetch it from the issuer.</param>
@@ -93,6 +118,8 @@ public sealed class OidcService : IDisposable
         IUserManager userManager,
         ISessionManager sessionManager,
         IHttpClientFactory httpClientFactory,
+        INetworkManager networkManager,
+        OidcLinkStore links,
         ILogger<OidcService> logger,
         TimeProvider timeProvider,
         IConfigurationManager<OpenIdConnectConfiguration>? configurationManager)
@@ -101,7 +128,11 @@ public sealed class OidcService : IDisposable
         _userManager = userManager;
         _sessionManager = sessionManager;
         _httpClientFactory = httpClientFactory;
+        _networkManager = networkManager;
+        _links = links;
         _logger = logger;
+        // Revokes the sessions of logins that were never picked up, without waiting for the next login.
+        _sweepTimer = new Timer(_ => RemoveExpired(), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
         _timeProvider = timeProvider;
         ConfigurationSource = configurationManager;
 
@@ -128,9 +159,10 @@ public sealed class OidcService : IDisposable
     /// Starts a login: remembers the device and builds the authorization request to send the user to.
     /// </summary>
     /// <param name="device">The device logging in.</param>
+    /// <param name="remoteEndPoint">The address of the client.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The state to bind to the browser, and the URL of the identity provider to redirect to.</returns>
-    public async Task<(string State, Uri AuthorizationUrl)> StartLoginAsync(OidcDevice device, CancellationToken cancellationToken)
+    public async Task<(string State, Uri AuthorizationUrl)> StartLoginAsync(OidcDevice device, string remoteEndPoint, CancellationToken cancellationToken)
     {
         EnsureEnabled();
         ValidateDevice(device);
@@ -144,9 +176,10 @@ public sealed class OidcService : IDisposable
         }
 
         RemoveExpired();
-        if (_pendingLogins.Count >= MaxPendingLogins)
+        if (_pendingLogins.Count >= MaxPendingLogins
+            || _pendingLogins.Values.Count(l => string.Equals(l.RemoteEndPoint, remoteEndPoint, StringComparison.Ordinal)) >= MaxPendingLoginsPerAddress)
         {
-            throw new OidcException(OidcError.TooManyLogins, "Too many logins are in progress.");
+            throw new OidcException(OidcError.TooManyLogins, $"Too many logins are in progress from {remoteEndPoint}.");
         }
 
         var state = NewSecret();
@@ -154,7 +187,7 @@ public sealed class OidcService : IDisposable
         var codeVerifier = NewSecret();
         var codeChallenge = Base64UrlEncoder.Encode(SHA256.HashData(Encoding.ASCII.GetBytes(codeVerifier)));
 
-        _pendingLogins[state] = new PendingLogin(nonce, codeVerifier, device, _timeProvider.GetUtcNow());
+        _pendingLogins[state] = new PendingLogin(nonce, codeVerifier, device, remoteEndPoint, _timeProvider.GetUtcNow());
 
         var query = new Dictionary<string, string>
         {
@@ -210,7 +243,7 @@ public sealed class OidcService : IDisposable
         var idToken = await ExchangeCodeAsync(code, pending.CodeVerifier, cancellationToken).ConfigureAwait(false);
         var identity = await ValidateIdTokenAsync(idToken, pending.Nonce, cancellationToken).ConfigureAwait(false);
 
-        var user = await GetOrCreateUserAsync(identity).ConfigureAwait(false);
+        var user = await GetOrCreateUserAsync(identity, remoteEndPoint).ConfigureAwait(false);
 
         AuthenticationResult result;
         try
@@ -265,6 +298,7 @@ public sealed class OidcService : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        _sweepTimer.Dispose();
         _metadataClient?.Dispose();
         _userLock.Dispose();
     }
@@ -418,7 +452,7 @@ public sealed class OidcService : IDisposable
         return await _tokenHandler.ValidateTokenAsync(idToken, parameters).ConfigureAwait(false);
     }
 
-    private async Task<User> GetOrCreateUserAsync(ClaimsIdentity identity)
+    private async Task<User> GetOrCreateUserAsync(ClaimsIdentity identity, string remoteEndPoint)
     {
         var username = identity.FindFirst(_settings.UsernameClaim)?.Value?.Trim();
         if (string.IsNullOrEmpty(username))
@@ -426,9 +460,24 @@ public sealed class OidcService : IDisposable
             throw new OidcException(OidcError.MissingUsername, $"The ID token has no '{_settings.UsernameClaim}' claim.");
         }
 
+        var subject = identity.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+        if (string.IsNullOrEmpty(subject))
+        {
+            throw new OidcException(OidcError.InvalidToken, "The ID token has no subject.");
+        }
+
+        var accountKey = OidcLinkStore.Key(_settings.Issuer!.OriginalString, subject);
+
         var groups = identity.FindAll(_settings.GroupsClaim).Select(c => c.Value).ToHashSet(StringComparer.Ordinal);
         if (_settings.AllowedGroup is not null && !groups.Contains(_settings.AllowedGroup))
         {
+            // Removed from the group: also end the sessions the account already has.
+            var linkedId = _links.FindUser(accountKey);
+            if (linkedId is not null)
+            {
+                await _sessionManager.RevokeUserTokens(linkedId.Value, string.Empty).ConfigureAwait(false);
+            }
+
             throw new OidcException(OidcError.AccessDenied, $"User {username} is not in the group allowed to log in.");
         }
 
@@ -436,29 +485,29 @@ public sealed class OidcService : IDisposable
         await _userLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            var user = _userManager.GetUserByName(username);
-            if (user is null)
-            {
-                if (!_settings.AutoCreateUsers)
-                {
-                    throw new OidcException(OidcError.AccessDenied, $"User {username} does not exist and users are not created automatically.");
-                }
-
-                try
-                {
-                    user = await _userManager.CreateUserAsync(username).ConfigureAwait(false);
-                }
-                catch (ArgumentException ex)
-                {
-                    throw new OidcException(OidcError.InvalidUsername, $"'{username}' is not a valid Jellyfin user name.", ex);
-                }
-
-                _logger.LogInformation("Created user {UserName} on their first OpenID Connect login.", username);
-            }
+            var user = FindLinkedUser(accountKey) ?? await LinkOrCreateUserAsync(username, accountKey).ConfigureAwait(false);
 
             if (user.HasPermission(PermissionKind.IsDisabled))
             {
-                throw new OidcException(OidcError.AccessDenied, $"User {username} is disabled.");
+                throw new OidcException(OidcError.AccessDenied, $"User {user.Username} is disabled.");
+            }
+
+            // The same policies as a password login.
+            if (!user.HasPermission(PermissionKind.EnableRemoteAccess) && !_networkManager.IsInLocalNetwork(remoteEndPoint))
+            {
+                throw new OidcException(OidcError.AccessDenied, $"User {user.Username} may not log in from outside the local network ({remoteEndPoint}).");
+            }
+
+            if (!user.IsParentalScheduleAllowed())
+            {
+                throw new OidcException(OidcError.AccessDenied, $"User {user.Username} is not allowed access at this time.");
+            }
+
+            // A user without a password could be logged in to with an empty one if password login is ever
+            // enabled again. Give it a random password nobody knows.
+            if (string.IsNullOrEmpty(user.Password))
+            {
+                await _userManager.ChangePassword(user.Id, NewSecret()).ConfigureAwait(false);
             }
 
             await ApplyAdministratorAsync(user, groups).ConfigureAwait(false);
@@ -468,6 +517,50 @@ public sealed class OidcService : IDisposable
         {
             _userLock.Release();
         }
+    }
+
+    private User? FindLinkedUser(string accountKey)
+    {
+        var userId = _links.FindUser(accountKey);
+        return userId is null ? null : _userManager.GetUserById(userId.Value);
+    }
+
+    private async Task<User> LinkOrCreateUserAsync(string username, string accountKey)
+    {
+        var user = _userManager.GetUserByName(username);
+        if (user is not null)
+        {
+            var linkedKey = _links.FindKey(user.Id);
+            if (linkedKey is not null && !string.Equals(linkedKey, accountKey, StringComparison.Ordinal))
+            {
+                // The user name now belongs to another identity provider account than the one this Jellyfin
+                // account was linked to: a rename, or somebody taking the name to take over the account.
+                throw new OidcException(OidcError.AccessDenied, $"User {username} is linked to another identity provider account.");
+            }
+
+            _logger.LogInformation("Linked user {UserName} to identity provider account {Account}.", user.Username, accountKey);
+        }
+        else
+        {
+            if (!_settings.AutoCreateUsers)
+            {
+                throw new OidcException(OidcError.AccessDenied, $"User {username} does not exist and users are not created automatically.");
+            }
+
+            try
+            {
+                user = await _userManager.CreateUserAsync(username).ConfigureAwait(false);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new OidcException(OidcError.InvalidUsername, $"'{username}' is not a valid Jellyfin user name.", ex);
+            }
+
+            _logger.LogInformation("Created user {UserName} on their first OpenID Connect login.", username);
+        }
+
+        _links.Link(user.Id, accountKey);
+        return user;
     }
 
     private async Task ApplyAdministratorAsync(User user, IReadOnlySet<string> groups)
@@ -505,10 +598,16 @@ public sealed class OidcService : IDisposable
 
         user.SetPermission(PermissionKind.IsAdministrator, shouldBeAdmin);
         await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
+        if (!shouldBeAdmin)
+        {
+            // Sessions opened as an administrator keep their rights otherwise.
+            await _sessionManager.RevokeUserTokens(user.Id, string.Empty).ConfigureAwait(false);
+        }
+
         _logger.LogInformation("{Change} administrator rights for {UserName} from OpenID Connect.", shouldBeAdmin ? "Granted" : "Removed", user.Username);
     }
 
-    private sealed record PendingLogin(string Nonce, string CodeVerifier, OidcDevice Device, DateTimeOffset CreatedAt);
+    private sealed record PendingLogin(string Nonce, string CodeVerifier, OidcDevice Device, string RemoteEndPoint, DateTimeOffset CreatedAt);
 
     private sealed record Handoff(AuthenticationResult Result, string DeviceId, DateTimeOffset CreatedAt);
 

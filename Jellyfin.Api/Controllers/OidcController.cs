@@ -98,8 +98,19 @@ public class OidcController : BaseJellyfinApiController
         try
         {
             var (state, authorizationUrl) = await _oidcService
-                .StartLoginAsync(new OidcDevice(deviceId, deviceName, client, version), cancellationToken)
+                .StartLoginAsync(new OidcDevice(deviceId, deviceName, client, version), HttpContext.GetNormalizedRemoteIP().ToString(), cancellationToken)
                 .ConfigureAwait(false);
+
+            var publicPath = _oidcService.Settings.PublicUrl!.AbsolutePath.TrimEnd('/');
+            if (!string.Equals(publicPath, BaseUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+            {
+                // The login cookie and the redirect back to the web client use the base URL. If the proxy rewrites
+                // the path, the cookie will not come back and every login fails as "not started from this browser".
+                _logger.LogWarning(
+                    "Oidc:PublicUrl has the path '{PublicPath}' but the server base URL is '{BaseUrl}'. OpenID Connect logins will fail unless they match.",
+                    publicPath,
+                    BaseUrl);
+            }
 
             Response.Cookies.Append(StateCookieName, state, new CookieOptions
             {

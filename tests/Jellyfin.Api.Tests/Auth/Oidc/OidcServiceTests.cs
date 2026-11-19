@@ -12,6 +12,7 @@ using Jellyfin.Api.Auth.Oidc;
 using Jellyfin.Data;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Authentication;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
@@ -41,6 +42,10 @@ public sealed class OidcServiceTests : IDisposable
     private readonly Mock<ISessionManager> _sessionManager = new();
     private readonly List<string> _loggedOut = new();
     private readonly Dictionary<string, string> _challenges = new();
+    private readonly Mock<INetworkManager> _networkManager = new();
+    private readonly OidcLinkStore _links = new(null, NullLogger.Instance);
+    private readonly List<Guid> _passwordsSet = new();
+    private readonly List<Guid> _tokensRevoked = new();
     private Func<IDictionary<string, string>, string?>? _issueIdToken;
 
     public OidcServiceTests()
@@ -58,6 +63,19 @@ public sealed class OidcServiceTests : IDisposable
                 return user;
             });
         _userManager.Setup(m => m.UpdateUserAsync(It.IsAny<User>())).Returns(Task.CompletedTask);
+        _userManager.Setup(m => m.GetUserById(It.IsAny<Guid>()))
+            .Returns((Guid id) => _users.FirstOrDefault(u => u.Id.Equals(id)));
+        _userManager.Setup(m => m.ChangePassword(It.IsAny<Guid>(), It.IsAny<string>()))
+            .Callback((Guid id, string password) =>
+            {
+                _passwordsSet.Add(id);
+                _users.First(u => u.Id.Equals(id)).Password = "hashed";
+            })
+            .Returns(Task.CompletedTask);
+        _sessionManager.Setup(m => m.RevokeUserTokens(It.IsAny<Guid>(), It.IsAny<string>()))
+            .Callback((Guid id, string _) => _tokensRevoked.Add(id))
+            .Returns(Task.CompletedTask);
+        _networkManager.Setup(m => m.IsInLocalNetwork(It.IsAny<string>())).Returns(true);
 
         _sessionManager.Setup(m => m.AuthenticateDirect(It.IsAny<AuthenticationRequest>()))
             .ReturnsAsync((AuthenticationRequest request) => new AuthenticationResult { AccessToken = "token-for-" + request.DeviceId });
@@ -352,7 +370,7 @@ public sealed class OidcServiceTests : IDisposable
     {
         using var service = CreateService();
 
-        var ex = await Assert.ThrowsAsync<OidcException>(() => service.StartLoginAsync(_device with { DeviceId = string.Empty }, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<OidcException>(() => service.StartLoginAsync(_device with { DeviceId = string.Empty }, "10.0.0.2", CancellationToken.None));
         Assert.Equal(OidcError.InvalidRequest, ex.Error);
     }
 
@@ -365,6 +383,117 @@ public sealed class OidcServiceTests : IDisposable
         => url.Query.TrimStart('?').Split('&')
             .Select(p => p.Split('=', 2))
             .ToDictionary(p => Uri.UnescapeDataString(p[0]), p => Uri.UnescapeDataString(p[1]));
+
+    [Fact]
+    public async Task Login_CreatedUser_GetsAnUnknownPassword()
+    {
+        using var service = CreateService();
+        var (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        var user = Assert.Single(_users);
+        Assert.Contains(user.Id, _passwordsSet);
+    }
+
+    [Fact]
+    public async Task Login_SameUsernameFromAnotherSubject_IsRejected()
+    {
+        var subject = "subject-1";
+        using var service = CreateService(form => CreateIdToken(new Dictionary<string, object> { ["nonce"] = form["nonce"], ["sub"] = subject }));
+
+        var (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        // Somebody else at the identity provider takes the user name "alice".
+        subject = "subject-2";
+        (state, _) = await StartAsync(service);
+        var ex = await Assert.ThrowsAsync<OidcException>(() => service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None));
+        Assert.Equal(OidcError.AccessDenied, ex.Error);
+    }
+
+    [Fact]
+    public async Task Login_LinkedSubjectWithNewUsername_LogsInToTheLinkedAccount()
+    {
+        var username = "alice";
+        using var service = CreateService(form => CreateIdToken(new Dictionary<string, object> { ["nonce"] = form["nonce"] }, username: username));
+
+        var (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        // The same identity provider account is renamed: it keeps its Jellyfin account rather than getting a new one.
+        username = "alice2";
+        (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        Assert.Equal("alice", Assert.Single(_users).Username);
+    }
+
+    [Fact]
+    public async Task Login_RemoteWithoutRemoteAccess_IsRejected()
+    {
+        var user = new User("alice", "provider", "reset-provider");
+        user.SetPermission(PermissionKind.EnableRemoteAccess, false);
+        _users.Add(user);
+        _networkManager.Setup(m => m.IsInLocalNetwork(It.IsAny<string>())).Returns(false);
+        using var service = CreateService();
+
+        var (state, _) = await StartAsync(service, remote: "203.0.113.5");
+        var ex = await Assert.ThrowsAsync<OidcException>(() => service.CompleteLoginAsync(state, state, "the-code", "203.0.113.5", CancellationToken.None));
+        Assert.Equal(OidcError.AccessDenied, ex.Error);
+    }
+
+    [Fact]
+    public async Task StartLogin_TooManyFromOneAddress_IsRejected()
+    {
+        using var service = CreateService();
+        for (var i = 0; i < 20; i++)
+        {
+            await StartAsync(service, remote: "203.0.113.5");
+        }
+
+        var ex = await Assert.ThrowsAsync<OidcException>(() => StartAsync(service, remote: "203.0.113.5"));
+        Assert.Equal(OidcError.TooManyLogins, ex.Error);
+
+        // Other clients can still log in.
+        await StartAsync(service, remote: "203.0.113.6");
+    }
+
+    [Fact]
+    public async Task Login_DemotedAdministrator_LosesExistingSessions()
+    {
+        var root = new User("root", "provider", "reset-provider");
+        root.SetPermission(PermissionKind.IsAdministrator, true);
+        var alice = new User("alice", "provider", "reset-provider");
+        alice.SetPermission(PermissionKind.IsAdministrator, true);
+        _users.Add(root);
+        _users.Add(alice);
+
+        using var service = CreateService(extraSettings: new[] { ("AdminGroup", "admins") });
+        var (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        Assert.False(alice.HasPermission(PermissionKind.IsAdministrator));
+        Assert.Contains(alice.Id, _tokensRevoked);
+    }
+
+    [Fact]
+    public void LinkStore_PersistsLinks()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "oidc-links-" + Guid.NewGuid() + ".json");
+        try
+        {
+            var userId = Guid.NewGuid();
+            new OidcLinkStore(path, NullLogger.Instance).Link(userId, OidcLinkStore.Key(Issuer + "/", "subject-1"));
+
+            var reloaded = new OidcLinkStore(path, NullLogger.Instance);
+            Assert.Equal(userId, reloaded.FindUser(OidcLinkStore.Key(Issuer, "subject-1")));
+            Assert.Null(reloaded.FindUser(OidcLinkStore.Key(Issuer, "subject-2")));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
 
     private string CreateIdToken(
         Dictionary<string, object> claims,
@@ -442,15 +571,17 @@ public sealed class OidcServiceTests : IDisposable
             _userManager.Object,
             _sessionManager.Object,
             factory.Object,
+            _networkManager.Object,
+            _links,
             NullLogger<OidcService>.Instance,
             TimeProvider.System,
             new StaticConfigurationManager<OpenIdConnectConfiguration>(metadata));
     }
 
     // Starts a login and records its PKCE challenge and nonce, so the fake token endpoint can check them.
-    private async Task<(string State, Uri Url)> StartAsync(OidcService service, OidcDevice? device = null)
+    private async Task<(string State, Uri Url)> StartAsync(OidcService service, OidcDevice? device = null, string remote = "10.0.0.2")
     {
-        var (state, url) = await service.StartLoginAsync(device ?? _device, CancellationToken.None);
+        var (state, url) = await service.StartLoginAsync(device ?? _device, remote, CancellationToken.None);
         var query = ParseQuery(url);
         _challenges[query["code_challenge"]] = query["nonce"];
         return (state, url);
