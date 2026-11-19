@@ -199,6 +199,12 @@ namespace Emby.Server.Implementations.SyncPlay
         internal long MaxGroupWait { get; init; } = DefaultMaxGroupWait;
 
         /// <summary>
+        /// Gets the provider of the names shown for the members, if any.
+        /// </summary>
+        /// <value>The display name provider.</value>
+        internal IUserDisplayNameProvider DisplayNames { get; init; }
+
+        /// <summary>
         /// Gets the group identifier.
         /// </summary>
         /// <value>The group identifier.</value>
@@ -242,7 +248,7 @@ namespace Emby.Server.Implementations.SyncPlay
         {
             _participants.TryAdd(
                 session.Id,
-                new GroupMember(session)
+                new GroupMember(session, DisplayNames?.GetDisplayName(session.UserId))
                 {
                     Ping = DefaultPing,
                     IsBuffering = false,
@@ -397,7 +403,7 @@ namespace Emby.Server.Implementations.SyncPlay
             var updateSession = new SyncPlayGroupJoinedUpdate(GroupId, GetInfo());
             SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, updateSession, cancellationToken);
 
-            var updateOthers = new SyncPlayUserJoinedUpdate(GroupId, session.UserName);
+            var updateOthers = new SyncPlayUserJoinedUpdate(GroupId, _participants[session.Id].UserName);
             SendGroupUpdate(session, SyncPlayBroadcastType.AllExceptCurrentSession, updateOthers, cancellationToken);
 
             _state.SessionJoined(this, _state.Type, session, cancellationToken);
@@ -414,6 +420,8 @@ namespace Emby.Server.Implementations.SyncPlay
         /// <param name="cancellationToken">The cancellation token.</param>
         public void SessionLeave(SessionInfo session, LeaveGroupRequest request, CancellationToken cancellationToken)
         {
+            var shownName = _participants.TryGetValue(session.Id, out var leaving) ? leaving.UserName : session.UserName;
+
             _state.SessionLeaving(this, _state.Type, session, cancellationToken);
 
             RemoveSession(session);
@@ -421,7 +429,7 @@ namespace Emby.Server.Implementations.SyncPlay
             var updateSession = new SyncPlayGroupLeftUpdate(GroupId, GroupId.ToString());
             SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, updateSession, cancellationToken);
 
-            var updateOthers = new SyncPlayUserLeftUpdate(GroupId, session.UserName);
+            var updateOthers = new SyncPlayUserLeftUpdate(GroupId, shownName);
             SendGroupUpdate(session, SyncPlayBroadcastType.AllExceptCurrentSession, updateOthers, cancellationToken);
             PublishWaitStatus(true, cancellationToken);
 

@@ -44,6 +44,7 @@ public sealed class OidcServiceTests : IDisposable
     private readonly Dictionary<string, string> _challenges = new();
     private readonly Mock<INetworkManager> _networkManager = new();
     private readonly OidcLinkStore _links = new(null, NullLogger.Instance);
+    private readonly OidcDisplayNameStore _displayNames = new((string?)null, NullLogger.Instance);
     private readonly List<Guid> _passwordsSet = new();
     private readonly List<Guid> _tokensRevoked = new();
     private string? _userInfo;
@@ -545,6 +546,61 @@ public sealed class OidcServiceTests : IDisposable
         Assert.Empty(_users);
     }
 
+    [Fact]
+    public async Task Login_PreferredUsername_IsTheDisplayName()
+    {
+        using var service = CreateService(
+            form => CreateIdToken(
+                new Dictionary<string, object>
+                {
+                    ["nonce"] = form["nonce"],
+                    ["preferred_username"] = "Andy",
+                    ["given_name"] = "Andrew",
+                    ["name"] = "andrew@example.com"
+                },
+                username: null),
+            extraSettings: new[] { ("UsernameClaim", "name") });
+
+        var (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        var user = Assert.Single(_users);
+        Assert.Equal("andrew@example.com", user.Username);
+        Assert.Equal("Andy", _displayNames.GetDisplayName(user.Id));
+    }
+
+    [Fact]
+    public async Task Login_NoPreferredUsername_FallsBackToTheFirstName()
+    {
+        using var service = CreateService(
+            form => CreateIdToken(
+                new Dictionary<string, object>
+                {
+                    ["nonce"] = form["nonce"],
+                    ["given_name"] = "Andrew",
+                    ["name"] = "andrew@example.com"
+                },
+                username: null),
+            extraSettings: new[] { ("UsernameClaim", "name") });
+
+        var (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        Assert.Equal("Andrew", _displayNames.GetDisplayName(Assert.Single(_users).Id));
+    }
+
+    [Theory]
+    [InlineData("  Andy  ", "Andy")]
+    [InlineData("An\u202Edy\n", "Andy")]
+    [InlineData("   ", null)]
+    [InlineData(null, null)]
+    public void DisplayName_IsCleanedUp(string? input, string? expected)
+    {
+        var decoded = input is null ? null : System.Text.RegularExpressions.Regex.Unescape(input);
+        Assert.Equal(expected, OidcDisplayNameStore.Sanitize(decoded));
+        Assert.Equal(OidcDisplayNameStore.MaxLength, OidcDisplayNameStore.Sanitize(new string('a', 500))!.Length);
+    }
+
     private string CreateIdToken(
         Dictionary<string, object> claims,
         string? issuer = null,
@@ -633,6 +689,7 @@ public sealed class OidcServiceTests : IDisposable
             factory.Object,
             _networkManager.Object,
             _links,
+            _displayNames,
             NullLogger<OidcService>.Instance,
             TimeProvider.System,
             new StaticConfigurationManager<OpenIdConnectConfiguration>(metadata));

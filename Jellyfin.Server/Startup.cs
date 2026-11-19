@@ -24,6 +24,7 @@ using Jellyfin.Server.Implementations.Users;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Extensions;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.XbmcMetadata;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -78,6 +79,10 @@ namespace Jellyfin.Server
             // instead of leaving it running with login in an unexpected state.
             services.AddSingleton(OidcSettings.FromConfiguration(_configuration));
             services.AddSingleton<OidcService>();
+
+            // The names shown for users (header, menus, SyncPlay), taken from the identity provider.
+            services.AddSingleton<OidcDisplayNameStore>();
+            services.AddSingleton<IUserDisplayNameProvider>(provider => provider.GetRequiredService<OidcDisplayNameStore>());
             services.AddJellyfinDbContext(_serverApplicationHost.ConfigurationManager, _configuration);
             services.AddJellyfinApiSwagger();
 

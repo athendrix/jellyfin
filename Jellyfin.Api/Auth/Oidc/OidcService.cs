@@ -60,6 +60,7 @@ public sealed class OidcService : IDisposable
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly INetworkManager _networkManager;
     private readonly OidcLinkStore _links;
+    private readonly OidcDisplayNameStore _displayNames;
     private readonly ILogger<OidcService> _logger;
     private readonly Timer _sweepTimer;
     private readonly ConfigurationManager<OpenIdConnectConfiguration>? _configurationManager;
@@ -79,6 +80,7 @@ public sealed class OidcService : IDisposable
     /// <param name="httpClientFactory">The HTTP client factory.</param>
     /// <param name="networkManager">The network manager.</param>
     /// <param name="applicationPaths">The application paths.</param>
+    /// <param name="displayNames">The display names.</param>
     /// <param name="logger">The logger.</param>
     public OidcService(
         OidcSettings settings,
@@ -87,6 +89,7 @@ public sealed class OidcService : IDisposable
         IHttpClientFactory httpClientFactory,
         INetworkManager networkManager,
         IApplicationPaths applicationPaths,
+        OidcDisplayNameStore displayNames,
         ILogger<OidcService> logger)
         : this(
             settings,
@@ -95,6 +98,7 @@ public sealed class OidcService : IDisposable
             httpClientFactory,
             networkManager,
             new OidcLinkStore(Path.Combine(applicationPaths.DataPath, "oidc-links.json"), logger),
+            displayNames,
             logger,
             TimeProvider.System,
             null)
@@ -110,6 +114,7 @@ public sealed class OidcService : IDisposable
     /// <param name="httpClientFactory">The HTTP client factory.</param>
     /// <param name="networkManager">The network manager.</param>
     /// <param name="links">The account links.</param>
+    /// <param name="displayNames">The display names.</param>
     /// <param name="logger">The logger.</param>
     /// <param name="timeProvider">The time provider.</param>
     /// <param name="configurationManager">The provider metadata source, or null to fetch it from the issuer.</param>
@@ -120,6 +125,7 @@ public sealed class OidcService : IDisposable
         IHttpClientFactory httpClientFactory,
         INetworkManager networkManager,
         OidcLinkStore links,
+        OidcDisplayNameStore displayNames,
         ILogger<OidcService> logger,
         TimeProvider timeProvider,
         IConfigurationManager<OpenIdConnectConfiguration>? configurationManager)
@@ -130,6 +136,7 @@ public sealed class OidcService : IDisposable
         _httpClientFactory = httpClientFactory;
         _networkManager = networkManager;
         _links = links;
+        _displayNames = displayNames;
         _logger = logger;
         // Revokes the sessions of logins that were never picked up, without waiting for the next login.
         _sweepTimer = new Timer(_ => RemoveExpired(), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
@@ -402,8 +409,15 @@ public sealed class OidcService : IDisposable
         var needsUsername = identity.FindFirst(_settings.UsernameClaim) is null;
         var needsGroups = (_settings.AdminGroup is not null || _settings.AllowedGroup is not null)
             && identity.FindFirst(_settings.GroupsClaim) is null;
-        if (!needsUsername && !needsGroups)
+        var needsDisplayName = _settings.DisplayNameClaims.All(claim => identity.FindFirst(claim) is null);
+        if (!needsUsername && !needsGroups && !needsDisplayName)
         {
+            return;
+        }
+
+        if (!needsUsername && !needsGroups && string.IsNullOrEmpty(accessToken))
+        {
+            // Only the display name is missing, which is optional.
             return;
         }
 
@@ -464,6 +478,17 @@ public sealed class OidcService : IDisposable
                 "The userinfo response has no string '{UsernameClaim}' claim either. Its claims are: {Claims}.",
                 _settings.UsernameClaim,
                 string.Join(", ", userInfo.EnumerateObject().Select(p => $"{p.Name} ({p.Value.ValueKind})")));
+        }
+
+        if (needsDisplayName)
+        {
+            foreach (var claim in _settings.DisplayNameClaims)
+            {
+                if (userInfo.TryGetProperty(claim, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    identity.AddClaim(new Claim(claim, value.GetString()!));
+                }
+            }
         }
 
         if (needsGroups && userInfo.TryGetProperty(_settings.GroupsClaim, out var groups))
@@ -609,6 +634,13 @@ public sealed class OidcService : IDisposable
             }
 
             await ApplyAdministratorAsync(user, groups).ConfigureAwait(false);
+
+            // The name shown for the user follows the identity provider at every login.
+            var displayName = _settings.DisplayNameClaims
+                .Select(claim => identity.FindFirst(claim)?.Value)
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+            _displayNames.SetDisplayName(user.Id, displayName);
+
             return user;
         }
         finally

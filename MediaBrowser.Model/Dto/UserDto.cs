@@ -27,6 +27,13 @@ namespace MediaBrowser.Model.Dto
         public string Name { get; set; }
 
         /// <summary>
+        /// Gets or sets the name to show for the user outside of user management, for example taken from an
+        /// identity provider. Null when the user has none, in which case <see cref="Name"/> is shown.
+        /// </summary>
+        /// <value>The display name.</value>
+        public string DisplayName { get; set; }
+
+        /// <summary>
         /// Gets or sets the server identifier.
         /// </summary>
         /// <value>The server identifier.</value>

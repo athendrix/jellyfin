@@ -443,12 +443,23 @@ public class WaitingGroupStateTests
         Assert.Equal(GroupStateType.Playing, group.GetInfo().State);
     }
 
+    [Fact]
+    public void Members_AreShownByDisplayName()
+    {
+        var displayNames = new Mock<IUserDisplayNameProvider>();
+        displayNames.Setup(d => d.GetDisplayName(It.IsAny<Guid>())).Returns("Andy");
+        var harness = new GroupHarness(displayNames: displayNames.Object);
+
+        Assert.All(harness.Group.GetWaitStatus().Members, m => Assert.Equal("Andy", m.UserName));
+        Assert.Equal(new[] { "Andy" }, harness.Group.GetInfo().Participants);
+    }
+
     private sealed class GroupHarness
     {
         private readonly ISessionManager _sessionManager;
         private readonly Guid _userId;
 
-        public GroupHarness(long? groupWaitTimeout = null, long? maxGroupWait = null)
+        public GroupHarness(long? groupWaitTimeout = null, long? maxGroupWait = null, IUserDisplayNameProvider? displayNames = null)
         {
             var userManager = new Mock<IUserManager>();
             var sessionManager = new Mock<ISessionManager>();
@@ -479,7 +490,8 @@ public class WaitingGroupStateTests
                 libraryManager.Object)
             {
                 GroupWaitTimeout = groupWaitTimeout ?? SyncPlayGroup.DefaultGroupWaitTimeout,
-                MaxGroupWait = maxGroupWait ?? SyncPlayGroup.DefaultMaxGroupWait
+                MaxGroupWait = maxGroupWait ?? SyncPlayGroup.DefaultMaxGroupWait,
+                DisplayNames = displayNames!
             };
 
             _sessionManager = sessionManager.Object;

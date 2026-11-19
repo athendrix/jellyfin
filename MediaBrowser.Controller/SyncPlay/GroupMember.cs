@@ -16,10 +16,20 @@ namespace MediaBrowser.Controller.SyncPlay
         /// </summary>
         /// <param name="session">The session.</param>
         public GroupMember(SessionInfo session)
+            : this(session, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="GroupMember"/> class.
+        /// </summary>
+        /// <param name="session">The session.</param>
+        /// <param name="displayName">The name shown for the user to the group, or null to show the user name.</param>
+        public GroupMember(SessionInfo session, string displayName)
         {
             SessionId = session.Id;
             UserId = session.UserId;
-            UserName = session.UserName;
+            UserName = string.IsNullOrWhiteSpace(displayName) ? session.UserName : displayName;
             DeviceName = session.DeviceName;
         }
 
@@ -36,7 +46,7 @@ namespace MediaBrowser.Controller.SyncPlay
         public Guid UserId { get; }
 
         /// <summary>
-        /// Gets the username.
+        /// Gets the name shown for the user to the group: the display name when the user has one, the user name otherwise.
         /// </summary>
         /// <value>The username.</value>
         public string UserName { get; }

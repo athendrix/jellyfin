@@ -38,6 +38,7 @@ namespace Jellyfin.Server.Implementations.Users
     /// </summary>
     public partial class UserManager : IUserManager, IDisposable
     {
+        private readonly IUserDisplayNameProvider? _displayNameProvider;
         private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
         private readonly IEventManager _eventManager;
         private readonly INetworkManager _networkManager;
@@ -65,6 +66,7 @@ namespace Jellyfin.Server.Implementations.Users
         /// <param name="serverConfigurationManager">The system config manager.</param>
         /// <param name="passwordResetProviders">The password reset providers.</param>
         /// <param name="authenticationProviders">The authentication providers.</param>
+        /// <param name="displayNameProvider">The provider of the names shown for users, if any.</param>
         public UserManager(
             IDbContextFactory<JellyfinDbContext> dbProvider,
             IEventManager eventManager,
@@ -74,9 +76,11 @@ namespace Jellyfin.Server.Implementations.Users
             ILogger<UserManager> logger,
             IServerConfigurationManager serverConfigurationManager,
             IEnumerable<IPasswordResetProvider> passwordResetProviders,
-            IEnumerable<IAuthenticationProvider> authenticationProviders)
+            IEnumerable<IAuthenticationProvider> authenticationProviders,
+            IUserDisplayNameProvider? displayNameProvider = null)
         {
             _dbProvider = dbProvider;
+            _displayNameProvider = displayNameProvider;
             _eventManager = eventManager;
             _networkManager = networkManager;
             _appHost = appHost;
@@ -455,6 +459,7 @@ namespace Jellyfin.Server.Implementations.Users
             return new UserDto
             {
                 Name = user.Username,
+                DisplayName = _displayNameProvider?.GetDisplayName(user.Id),
                 Id = user.Id,
                 ServerId = _appHost.SystemId,
                 EnableAutoLogin = user.EnableAutoLogin,

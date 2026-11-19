@@ -60,6 +60,8 @@ namespace Emby.Server.Implementations.SyncPlay
         /// </summary>
         private readonly ILibraryManager _libraryManager;
 
+        private readonly IUserDisplayNameProvider _displayNames;
+
         /// <summary>
         /// The map between users and counter of active sessions.
         /// </summary>
@@ -101,17 +103,20 @@ namespace Emby.Server.Implementations.SyncPlay
         /// <param name="sessionManager">The session manager.</param>
         /// <param name="libraryManager">The library manager.</param>
         /// <param name="configuration">The configuration, to read the disconnect grace period from.</param>
+        /// <param name="displayNames">The provider of the names shown for users, if any.</param>
         public SyncPlayManager(
             ILoggerFactory loggerFactory,
             IUserManager userManager,
             ISessionManager sessionManager,
             ILibraryManager libraryManager,
-            IConfiguration configuration = null)
+            IConfiguration configuration = null,
+            IUserDisplayNameProvider displayNames = null)
         {
             _loggerFactory = loggerFactory;
             _userManager = userManager;
             _sessionManager = sessionManager;
             _libraryManager = libraryManager;
+            _displayNames = displayNames;
             _logger = loggerFactory.CreateLogger<SyncPlayManager>();
             // SyncPlay:DisconnectGraceSeconds, e.g. JELLYFIN_SyncPlay__DisconnectGraceSeconds=300.
             var graceSeconds = configuration?.GetValue<double?>("SyncPlay:DisconnectGraceSeconds");
@@ -174,7 +179,8 @@ namespace Emby.Server.Implementations.SyncPlay
 
                 var group = new Group(_loggerFactory, _userManager, _sessionManager, _libraryManager)
                 {
-                    GroupWaitTimeout = GroupWaitTimeout
+                    GroupWaitTimeout = GroupWaitTimeout,
+                    DisplayNames = _displayNames
                 };
                 _groups[group.GroupId] = group;
                 UpdateGroupWaitTimer();

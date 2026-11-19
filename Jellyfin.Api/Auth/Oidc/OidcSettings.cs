@@ -70,6 +70,11 @@ public sealed class OidcSettings
     public string UsernameClaim { get; private init; } = "preferred_username";
 
     /// <summary>
+    /// Gets the claims holding the name shown for the user outside of user management, in order of preference.
+    /// </summary>
+    public IReadOnlyList<string> DisplayNameClaims { get; private init; } = new[] { "preferred_username", "given_name" };
+
+    /// <summary>
     /// Gets the claim holding the groups of the user.
     /// </summary>
     public string GroupsClaim { get; private init; } = "groups";
@@ -154,6 +159,8 @@ public sealed class OidcSettings
             RedirectUri = redirectUri,
             Scopes = scopes,
             UsernameClaim = NullIfBlank(section["UsernameClaim"]) ?? "preferred_username",
+            DisplayNameClaims = (NullIfBlank(section["DisplayNameClaims"]) ?? "preferred_username,given_name")
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             GroupsClaim = NullIfBlank(section["GroupsClaim"]) ?? "groups",
             AdminGroup = adminGroup,
             AllowedGroup = allowedGroup,
