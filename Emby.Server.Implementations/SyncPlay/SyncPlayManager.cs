@@ -9,6 +9,7 @@ using MediaBrowser.Controller.Session;
 using MediaBrowser.Controller.SyncPlay;
 using MediaBrowser.Controller.SyncPlay.Requests;
 using MediaBrowser.Model.SyncPlay;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.SyncPlay
@@ -22,6 +23,17 @@ namespace Emby.Server.Implementations.SyncPlay
         /// How often, in milliseconds, the groups are checked for a spent wait deadline.
         /// </summary>
         private const int GroupWaitSweepInterval = 1000;
+
+        /// <summary>
+        /// The default value of <see cref="DisconnectGracePeriod"/>.
+        /// </summary>
+        internal static readonly TimeSpan DefaultDisconnectGracePeriod = TimeSpan.FromMinutes(2);
+
+        /// <summary>
+        /// The sessions that disconnected while in a group, with the time they are removed from it unless they reconnect.
+        /// </summary>
+        private readonly ConcurrentDictionary<string, (SessionInfo Session, long RemoveAt)> _disconnectedSessions =
+            new ConcurrentDictionary<string, (SessionInfo Session, long RemoveAt)>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// The logger.
@@ -88,18 +100,28 @@ namespace Emby.Server.Implementations.SyncPlay
         /// <param name="userManager">The user manager.</param>
         /// <param name="sessionManager">The session manager.</param>
         /// <param name="libraryManager">The library manager.</param>
+        /// <param name="configuration">The configuration, to read the disconnect grace period from.</param>
         public SyncPlayManager(
             ILoggerFactory loggerFactory,
             IUserManager userManager,
             ISessionManager sessionManager,
-            ILibraryManager libraryManager)
+            ILibraryManager libraryManager,
+            IConfiguration configuration = null)
         {
             _loggerFactory = loggerFactory;
             _userManager = userManager;
             _sessionManager = sessionManager;
             _libraryManager = libraryManager;
             _logger = loggerFactory.CreateLogger<SyncPlayManager>();
+            // SyncPlay:DisconnectGraceSeconds, e.g. JELLYFIN_SyncPlay__DisconnectGraceSeconds=300.
+            var graceSeconds = configuration?.GetValue<double?>("SyncPlay:DisconnectGraceSeconds");
+            if (graceSeconds is not null)
+            {
+                DisconnectGracePeriod = TimeSpan.FromSeconds(Math.Max(0, graceSeconds.Value));
+            }
+
             _sessionManager.SessionEnded += OnSessionEnded;
+            _sessionManager.SessionControllerConnected += OnSessionControllerConnected;
             _groupWaitTimer = new Timer(_ => OnGroupWaitTimerTick(), null, Timeout.Infinite, Timeout.Infinite);
         }
 
@@ -108,6 +130,17 @@ namespace Emby.Server.Implementations.SyncPlay
         /// </summary>
         /// <value>The group-wait timeout.</value>
         internal long GroupWaitTimeout { get; init; } = Group.DefaultGroupWaitTimeout;
+
+        /// <summary>
+        /// Gets how long a session that disconnected stays in its group, waiting for it to reconnect.
+        /// </summary>
+        /// <value>The grace period.</value>
+        /// <remarks>
+        /// A WebSocket drops on any network hiccup, when a computer wakes from sleep, or when a reverse proxy
+        /// reloads its configuration (which a Kubernetes ingress controller does whenever any ingress changes).
+        /// The client reconnects within seconds. Removing it from the group right away made it lose the group.
+        /// </remarks>
+        internal TimeSpan DisconnectGracePeriod { get; init; } = DefaultDisconnectGracePeriod;
 
         /// <inheritdoc />
         public void Dispose()
@@ -351,6 +384,9 @@ namespace Emby.Server.Implementations.SyncPlay
 
             if (_sessionToGroupMap.TryGetValue(session.Id, out var group))
             {
+                // A session making requests is connected, whatever happened to its WebSocket.
+                _disconnectedSessions.TryRemove(session.Id, out _);
+
                 // Group lock required as Group is not thread-safe.
                 lock (group)
                 {
@@ -406,6 +442,7 @@ namespace Emby.Server.Implementations.SyncPlay
             }
 
             _sessionManager.SessionEnded -= OnSessionEnded;
+            _sessionManager.SessionControllerConnected -= OnSessionControllerConnected;
 
             lock (_groupsLock)
             {
@@ -450,16 +487,78 @@ namespace Emby.Server.Implementations.SyncPlay
             {
                 _logger.LogError(ex, "Error while recovering SyncPlay groups from a timed out wait.");
             }
+
+            RemoveDisconnectedSessions();
+        }
+
+        private void RemoveDisconnectedSessions()
+        {
+            var now = Environment.TickCount64;
+            foreach (var (sessionId, entry) in _disconnectedSessions)
+            {
+                if (entry.RemoveAt > now || !_disconnectedSessions.TryRemove(new KeyValuePair<string, (SessionInfo, long)>(sessionId, entry)))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (_sessionToGroupMap.ContainsKey(sessionId))
+                    {
+                        _logger.LogInformation("Session {SessionId} did not reconnect within {GracePeriod}, removing it from its SyncPlay group.", sessionId, DisconnectGracePeriod);
+                        LeaveGroup(entry.Session, new LeaveGroupRequest(), CancellationToken.None);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error while removing disconnected session {SessionId} from its SyncPlay group.", sessionId);
+                }
+            }
         }
 
         private void OnSessionEnded(object sender, SessionEventArgs e)
         {
             var session = e.SessionInfo;
 
-            if (_sessionToGroupMap.TryGetValue(session.Id, out _))
+            if (!_sessionToGroupMap.TryGetValue(session.Id, out _))
             {
-                var leaveGroupRequest = new LeaveGroupRequest();
-                LeaveGroup(session, leaveGroupRequest, CancellationToken.None);
+                return;
+            }
+
+            if (DisconnectGracePeriod <= TimeSpan.Zero)
+            {
+                LeaveGroup(session, new LeaveGroupRequest(), CancellationToken.None);
+                return;
+            }
+
+            // Keep the session in its group for a while: it most likely lost its connection for a moment and
+            // is about to reconnect. The group stops waiting for it like for any member that stopped responding.
+            _logger.LogInformation("Session {SessionId} disconnected while in a SyncPlay group, keeping its place for {GracePeriod}.", session.Id, DisconnectGracePeriod);
+            _disconnectedSessions[session.Id] = (session, Environment.TickCount64 + (long)DisconnectGracePeriod.TotalMilliseconds);
+        }
+
+        private void OnSessionControllerConnected(object sender, SessionEventArgs e)
+        {
+            var session = e.SessionInfo;
+            var wasDisconnected = _disconnectedSessions.TryRemove(session.Id, out _);
+
+            if (!_sessionToGroupMap.TryGetValue(session.Id, out var group))
+            {
+                return;
+            }
+
+            if (wasDisconnected)
+            {
+                _logger.LogInformation("Session {SessionId} reconnected, restoring its SyncPlay group.", session.Id);
+            }
+
+            // Bring the session up to date: it may have missed messages while its WebSocket was reconnecting.
+            lock (group)
+            {
+                if (_sessionToGroupMap.TryGetValue(session.Id, out var checkGroup) && checkGroup.GroupId.Equals(group.GroupId))
+                {
+                    group.ResyncSession(session, CancellationToken.None);
+                }
             }
         }
 
