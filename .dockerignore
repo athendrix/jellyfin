@@ -1,6 +1,19 @@
+.git
+.dockerignore
+Dockerfile
+Dockerfile.arm
+Dockerfile.arm64
+CONTRIBUTORS.md
+README.md
+deployment/*/dist
+deployment/*/pkg-dist
+deployment/collect-dist/
+ci/
+
+# Build outputs, which the fork image rebuilds (deployment/fork/Dockerfile)
 **/bin/
 **/obj/
 **/.vs/
 **/node_modules/
+jellyfin-web-src/.git
 jellyfin-web-src/dist/
-.git/
