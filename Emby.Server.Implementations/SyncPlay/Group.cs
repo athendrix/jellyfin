@@ -931,6 +931,49 @@ namespace Emby.Server.Implementations.SyncPlay
         }
 
         /// <summary>
+        /// Sends the current state of the group to a member that reconnected, which may have missed updates.
+        /// </summary>
+        /// <param name="session">The session, as it is after reconnecting.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        internal void ResyncSession(SessionInfo session, CancellationToken cancellationToken)
+        {
+            if (!_participants.TryGetValue(session.Id, out var member))
+            {
+                return;
+            }
+
+            // A reconnected session is a new SessionInfo with the same id.
+            _participantSessions[session.Id] = session;
+            member.LastSeen = Environment.TickCount64;
+
+            // Re-enables SyncPlay on a client that gave up on the group while disconnected; ignored by one that did not.
+            var joined = new SyncPlayGroupJoinedUpdate(GroupId, GetInfo());
+            SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, joined, cancellationToken);
+
+            if (PlayQueue.GetPlaylist().Count > 0)
+            {
+                // Clients ignore a queue they already have, and pick up one that changed while they were away.
+                var playQueueUpdate = GetPlayQueueUpdate(PlayQueueUpdateReason.NewPlaylist);
+                SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, new SyncPlayPlayQueueUpdate(GroupId, playQueueUpdate), cancellationToken);
+            }
+
+            switch (_state.Type)
+            {
+                case GroupStateType.Playing:
+                    SendCommand(session, SyncPlayBroadcastType.CurrentSession, NewSyncPlayCommand(SendCommandType.Unpause), cancellationToken);
+                    break;
+                case GroupStateType.Paused:
+                    SendCommand(session, SyncPlayBroadcastType.CurrentSession, NewSyncPlayCommand(SendCommandType.Pause), cancellationToken);
+                    break;
+                default:
+                    // Waiting: the group waits for the session's ready request. Idle: nothing is playing.
+                    break;
+            }
+
+            PublishWaitStatus(true, cancellationToken);
+        }
+
+        /// <summary>
         /// Starts, keeps or ends the current waiting period.
         /// </summary>
         /// <param name="startNewWaitingPeriod">Whether every member has just been reset, starting a new waiting period.</param>
