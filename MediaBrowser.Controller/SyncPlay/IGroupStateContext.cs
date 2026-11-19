@@ -112,6 +112,15 @@ namespace MediaBrowser.Controller.SyncPlay
         void UpdatePing(SessionInfo session, long ping);
 
         /// <summary>
+        /// Records how far along a session is in loading the playing item.
+        /// </summary>
+        /// <param name="session">The session.</param>
+        /// <param name="playlistItemId">The playlist item the session is loading.</param>
+        /// <param name="progress">The loading progress, between 0 and 1, or null when the session cannot tell.</param>
+        /// <param name="stage">What the session is doing.</param>
+        void UpdateLoadProgress(SessionInfo session, Guid playlistItemId, double? progress, GroupMemberLoadStage stage);
+
+        /// <summary>
         /// Gets the highest ping in the group, in milliseconds.
         /// </summary>
         /// <returns>The highest ping in the group.</returns>

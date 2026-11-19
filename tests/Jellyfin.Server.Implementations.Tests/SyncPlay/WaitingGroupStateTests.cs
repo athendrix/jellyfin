@@ -323,12 +323,132 @@ public class WaitingGroupStateTests
         Assert.NotNull(group.GroupWaitDeadline);
     }
 
+    [Fact]
+    public async Task LoadProgress_SlowMemberKeepsReporting_GroupKeepsWaitingForIt()
+    {
+        var harness = new GroupHarness(groupWaitTimeout: 200);
+        var group = harness.Group;
+
+        group.HandleRequest(harness.First, new PlayGroupRequest(new[] { Guid.NewGuid() }, 0, 0), CancellationToken.None);
+        var playlistItemId = group.PlayQueue.GetPlayingItemPlaylistId();
+        group.HandleRequest(harness.First, new ReadyGroupRequest(DateTime.UtcNow, 0, false, playlistItemId), CancellationToken.None);
+        Assert.Equal(GroupStateType.Waiting, group.GetInfo().State);
+
+        // The second member takes far longer than the stall timeout, but keeps saying it is working.
+        var until = DateTime.UtcNow.AddMilliseconds(5 * 200);
+        var progress = 0.0;
+        while (DateTime.UtcNow < until)
+        {
+            progress = Math.Min(1, progress + 0.05);
+            group.HandleRequest(
+                harness.Second,
+                new LoadProgressGroupRequest(playlistItemId, progress, GroupMemberLoadStage.Loading),
+                CancellationToken.None);
+            harness.PumpGroupWaitTimeout();
+            await Task.Delay(40, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(GroupStateType.Waiting, group.GetInfo().State);
+
+        var status = group.GetWaitStatus();
+        var second = status.Members.Single(m => m.UserName == "second");
+        Assert.False(second.IsReady);
+        Assert.Equal(GroupMemberLoadStage.Loading, second.Stage);
+        Assert.NotNull(second.Progress);
+        Assert.True(status.Members.Single(m => m.UserName == "first").IsReady);
+        Assert.NotNull(status.WaitingSince);
+
+        group.HandleRequest(harness.Second, new ReadyGroupRequest(DateTime.UtcNow, 0, false, playlistItemId), CancellationToken.None);
+        Assert.Equal(GroupStateType.Playing, group.GetInfo().State);
+    }
+
+    [Fact]
+    public async Task LoadProgress_MemberGoesSilent_GroupGivesUpOnIt()
+    {
+        var harness = new GroupHarness(groupWaitTimeout: 200);
+        var group = harness.Group;
+
+        group.HandleRequest(harness.First, new PlayGroupRequest(new[] { Guid.NewGuid() }, 0, 0), CancellationToken.None);
+        var playlistItemId = group.PlayQueue.GetPlayingItemPlaylistId();
+        group.HandleRequest(harness.First, new ReadyGroupRequest(DateTime.UtcNow, 0, false, playlistItemId), CancellationToken.None);
+        group.HandleRequest(
+            harness.Second,
+            new LoadProgressGroupRequest(playlistItemId, 0.1, GroupMemberLoadStage.Loading),
+            CancellationToken.None);
+
+        await harness.WaitForState(GroupStateType.Playing);
+    }
+
+    [Fact]
+    public void LoadProgress_ForAnotherItem_IsIgnored()
+    {
+        var harness = new GroupHarness();
+        var group = harness.Group;
+
+        group.HandleRequest(harness.First, new PlayGroupRequest(new[] { Guid.NewGuid() }, 0, 0), CancellationToken.None);
+
+        group.HandleRequest(
+            harness.Second,
+            new LoadProgressGroupRequest(Guid.NewGuid(), 0.9, GroupMemberLoadStage.Buffering),
+            CancellationToken.None);
+
+        var second = group.GetWaitStatus().Members.Single(m => m.UserName == "second");
+        Assert.Equal(GroupMemberLoadStage.Loading, second.Stage);
+        Assert.Null(second.Progress);
+    }
+
+    [Fact]
+    public void LoadProgress_OutOfRange_IsClamped()
+    {
+        var harness = new GroupHarness();
+        var group = harness.Group;
+
+        group.HandleRequest(harness.First, new PlayGroupRequest(new[] { Guid.NewGuid() }, 0, 0), CancellationToken.None);
+        var playlistItemId = group.PlayQueue.GetPlayingItemPlaylistId();
+
+        group.HandleRequest(
+            harness.Second,
+            new LoadProgressGroupRequest(playlistItemId, 7, GroupMemberLoadStage.Buffering),
+            CancellationToken.None);
+        Assert.Equal(1, group.GetWaitStatus().Members.Single(m => m.UserName == "second").Progress);
+
+        group.HandleRequest(
+            harness.Second,
+            new LoadProgressGroupRequest(playlistItemId, double.NaN, GroupMemberLoadStage.Buffering),
+            CancellationToken.None);
+        Assert.Null(group.GetWaitStatus().Members.Single(m => m.UserName == "second").Progress);
+    }
+
+    [Fact]
+    public async Task LoadProgress_KeepsReportingPastTheMaximumWait_GroupGivesUp()
+    {
+        var harness = new GroupHarness(groupWaitTimeout: 10_000, maxGroupWait: 300);
+        var group = harness.Group;
+
+        group.HandleRequest(harness.First, new PlayGroupRequest(new[] { Guid.NewGuid() }, 0, 0), CancellationToken.None);
+        var playlistItemId = group.PlayQueue.GetPlayingItemPlaylistId();
+        group.HandleRequest(harness.First, new ReadyGroupRequest(DateTime.UtcNow, 0, false, playlistItemId), CancellationToken.None);
+
+        var until = DateTime.UtcNow.AddSeconds(5);
+        while (group.GetInfo().State == GroupStateType.Waiting && DateTime.UtcNow < until)
+        {
+            group.HandleRequest(
+                harness.Second,
+                new LoadProgressGroupRequest(playlistItemId, null, GroupMemberLoadStage.Loading),
+                CancellationToken.None);
+            harness.PumpGroupWaitTimeout();
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(GroupStateType.Playing, group.GetInfo().State);
+    }
+
     private sealed class GroupHarness
     {
         private readonly ISessionManager _sessionManager;
         private readonly Guid _userId;
 
-        public GroupHarness(long? groupWaitTimeout = null)
+        public GroupHarness(long? groupWaitTimeout = null, long? maxGroupWait = null)
         {
             var userManager = new Mock<IUserManager>();
             var sessionManager = new Mock<ISessionManager>();
@@ -358,7 +478,8 @@ public class WaitingGroupStateTests
                 sessionManager.Object,
                 libraryManager.Object)
             {
-                GroupWaitTimeout = groupWaitTimeout ?? SyncPlayGroup.DefaultGroupWaitTimeout
+                GroupWaitTimeout = groupWaitTimeout ?? SyncPlayGroup.DefaultGroupWaitTimeout,
+                MaxGroupWait = maxGroupWait ?? SyncPlayGroup.DefaultMaxGroupWait
             };
 
             _sessionManager = sessionManager.Object;

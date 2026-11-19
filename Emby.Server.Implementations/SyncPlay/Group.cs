@@ -33,6 +33,16 @@ namespace Emby.Server.Implementations.SyncPlay
         internal const long DefaultGroupWaitTimeout = 30000;
 
         /// <summary>
+        /// The default value of <see cref="MaxGroupWait"/>, in milliseconds.
+        /// </summary>
+        internal const long DefaultMaxGroupWait = 15 * 60 * 1000;
+
+        /// <summary>
+        /// The minimum time, in milliseconds, between two wait-status updates that only report progress.
+        /// </summary>
+        private const long WaitStatusThrottle = 250;
+
+        /// <summary>
         /// The logger.
         /// </summary>
         private readonly ILogger<Group> _logger;
@@ -71,6 +81,24 @@ namespace Emby.Server.Implementations.SyncPlay
         /// The internal group state.
         /// </summary>
         private IGroupState _state;
+
+        /// <summary>
+        /// The time, in <see cref="Environment.TickCount64"/> milliseconds, the current waiting period started.
+        /// </summary>
+        private long? _waitStartedAt;
+
+        /// <summary>
+        /// The UTC time the current waiting period started, reported to the clients.
+        /// </summary>
+        private DateTime? _waitStartedAtUtc;
+
+        private string _lastWaitStatusStructure;
+
+        private string _lastWaitStatusProgress;
+
+        private long _lastWaitStatusSentAt;
+
+        private bool _waitStatusPending;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Group" /> class.
@@ -135,7 +163,40 @@ namespace Emby.Server.Implementations.SyncPlay
         /// for its members, or <c>null</c> when it is not waiting for anyone.
         /// </summary>
         /// <value>The group-wait deadline.</value>
-        internal long? GroupWaitDeadline { get; private set; }
+        internal long? GroupWaitDeadline
+        {
+            get
+            {
+                if (_waitStartedAt is null)
+                {
+                    return null;
+                }
+
+                // The group gives up only once every member it waits for has gone quiet: a member that
+                // keeps reporting progress is slow, not lost, and the group keeps waiting for it.
+                long? lastSign = null;
+                foreach (var member in _participants.Values)
+                {
+                    if (member.IsBuffering && !member.IgnoreGroupWait)
+                    {
+                        lastSign = Math.Max(lastSign ?? long.MinValue, member.LastSeen);
+                    }
+                }
+
+                if (lastSign is null)
+                {
+                    return null;
+                }
+
+                return Math.Min(lastSign.Value + GroupWaitTimeout, _waitStartedAt.Value + MaxGroupWait);
+            }
+        }
+
+        /// <summary>
+        /// Gets the longest time, in milliseconds, the group waits for its members, even when they keep reporting progress.
+        /// </summary>
+        /// <value>The maximum group wait.</value>
+        internal long MaxGroupWait { get; init; } = DefaultMaxGroupWait;
 
         /// <summary>
         /// Gets the group identifier.
@@ -184,7 +245,8 @@ namespace Emby.Server.Implementations.SyncPlay
                 new GroupMember(session)
                 {
                     Ping = DefaultPing,
-                    IsBuffering = false
+                    IsBuffering = false,
+                    LastSeen = Environment.TickCount64
                 });
 
             _participantSessions[session.Id] = session;
@@ -198,7 +260,7 @@ namespace Emby.Server.Implementations.SyncPlay
         {
             _participants.Remove(session.Id);
             _participantSessions.Remove(session.Id);
-            UpdateGroupWaitDeadline(false);
+            UpdateWaitPeriod(false);
         }
 
         /// <summary>
@@ -317,6 +379,7 @@ namespace Emby.Server.Implementations.SyncPlay
             SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, updateSession, cancellationToken);
 
             _state.SessionJoined(this, _state.Type, session, cancellationToken);
+            PublishWaitStatus(true, cancellationToken);
 
             _logger.LogInformation("Session {SessionId} created group {GroupId}.", session.Id, GroupId.ToString());
         }
@@ -338,6 +401,7 @@ namespace Emby.Server.Implementations.SyncPlay
             SendGroupUpdate(session, SyncPlayBroadcastType.AllExceptCurrentSession, updateOthers, cancellationToken);
 
             _state.SessionJoined(this, _state.Type, session, cancellationToken);
+            PublishWaitStatus(true, cancellationToken);
 
             _logger.LogInformation("Session {SessionId} joined group {GroupId}.", session.Id, GroupId.ToString());
         }
@@ -359,6 +423,7 @@ namespace Emby.Server.Implementations.SyncPlay
 
             var updateOthers = new SyncPlayUserLeftUpdate(GroupId, session.UserName);
             SendGroupUpdate(session, SyncPlayBroadcastType.AllExceptCurrentSession, updateOthers, cancellationToken);
+            PublishWaitStatus(true, cancellationToken);
 
             _logger.LogInformation("Session {SessionId} left group {GroupId}.", session.Id, GroupId.ToString());
         }
@@ -374,7 +439,15 @@ namespace Emby.Server.Implementations.SyncPlay
             // The server's job is to maintain a consistent state for clients to reference
             // and notify clients of state changes. The actual syncing of media playback
             // happens client side. Clients are aware of the server's time and use it to sync.
-            _logger.LogInformation("Session {SessionId} requested {RequestType} in group {GroupId} that is {StateType}.", session.Id, request.Action, GroupId.ToString(), _state.Type);
+            if (request.Action is PlaybackRequestType.Ping or PlaybackRequestType.LoadProgress)
+            {
+                // These arrive every few seconds from every member and do not change the group state.
+                _logger.LogDebug("Session {SessionId} requested {RequestType} in group {GroupId} that is {StateType}.", session.Id, request.Action, GroupId.ToString(), _state.Type);
+            }
+            else
+            {
+                _logger.LogInformation("Session {SessionId} requested {RequestType} in group {GroupId} that is {StateType}.", session.Id, request.Action, GroupId.ToString(), _state.Type);
+            }
 
             // Apply requested changes to this group given its current state.
             // Every request has a slightly different outcome depending on the group's state.
@@ -386,6 +459,9 @@ namespace Emby.Server.Implementations.SyncPlay
             // - Playing: clients have some media loaded and playback is unpaused.
             // - Paused: clients have some media loaded but playback is currently paused.
             request.Apply(this, _state, session, cancellationToken);
+
+            // Let every member see who the group is waiting for.
+            PublishWaitStatus(false, cancellationToken);
         }
 
         /// <summary>
@@ -415,9 +491,10 @@ namespace Emby.Server.Implementations.SyncPlay
             if (_participants.TryGetValue(session.Id, out GroupMember value))
             {
                 value.IgnoreGroupWait = ignoreGroupWait;
+                value.LastSeen = Environment.TickCount64;
             }
 
-            UpdateGroupWaitDeadline(false);
+            UpdateWaitPeriod(false);
         }
 
         /// <inheritdoc />
@@ -428,7 +505,8 @@ namespace Emby.Server.Implementations.SyncPlay
 
             if (state.Type != GroupStateType.Waiting)
             {
-                GroupWaitDeadline = null;
+                _waitStartedAt = null;
+                _waitStartedAtUtc = null;
             }
         }
 
@@ -489,6 +567,35 @@ namespace Emby.Server.Implementations.SyncPlay
         }
 
         /// <inheritdoc />
+        public void UpdateLoadProgress(SessionInfo session, Guid playlistItemId, double? progress, GroupMemberLoadStage stage)
+        {
+            if (!_participants.TryGetValue(session.Id, out GroupMember member))
+            {
+                return;
+            }
+
+            // A report about another item is left over from before the queue changed.
+            if (!playlistItemId.Equals(PlayQueue.GetPlayingItemPlaylistId()))
+            {
+                return;
+            }
+
+            // Every report is a sign of life, which keeps the group waiting for a member that is slow but working.
+            member.LastSeen = Environment.TickCount64;
+
+            // Readiness is decided by the ready and buffering requests, progress only describes the way there.
+            if (!member.IsBuffering || stage == GroupMemberLoadStage.Ready)
+            {
+                return;
+            }
+
+            member.LoadStage = stage;
+            member.LoadProgress = progress is null || double.IsNaN(progress.Value)
+                ? null
+                : Math.Clamp(progress.Value, 0, 1);
+        }
+
+        /// <inheritdoc />
         public long GetHighestPing()
         {
             long max = long.MinValue;
@@ -508,21 +615,39 @@ namespace Emby.Server.Implementations.SyncPlay
             if (_participants.TryGetValue(session.Id, out GroupMember value))
             {
                 value.IsBuffering = isBuffering;
+                value.LastSeen = Environment.TickCount64;
+                if (isBuffering)
+                {
+                    if (value.LoadStage is GroupMemberLoadStage.Ready or GroupMemberLoadStage.Unknown)
+                    {
+                        value.LoadStage = GroupMemberLoadStage.Buffering;
+                        value.LoadProgress = null;
+                    }
+                }
+                else
+                {
+                    value.LoadStage = GroupMemberLoadStage.Ready;
+                    value.LoadProgress = 1;
+                }
             }
 
-            UpdateGroupWaitDeadline(false);
+            UpdateWaitPeriod(false);
         }
 
         /// <inheritdoc />
         public void SetAllBuffering(bool isBuffering)
         {
+            var now = Environment.TickCount64;
             foreach (var session in _participants.Values)
             {
                 session.IsBuffering = isBuffering;
+                session.LastSeen = now;
+                session.LoadStage = isBuffering ? GroupMemberLoadStage.Loading : GroupMemberLoadStage.Ready;
+                session.LoadProgress = isBuffering ? null : 1;
             }
 
             // Resetting the status of every session starts a new waiting period.
-            UpdateGroupWaitDeadline(isBuffering);
+            UpdateWaitPeriod(isBuffering);
         }
 
         /// <inheritdoc />
@@ -732,18 +857,27 @@ namespace Emby.Server.Implementations.SyncPlay
 
         /// <summary>
         /// Stops waiting for the members that have not reported ready and lets the rest of the
-        /// group carry on. Does nothing until <see cref="GroupWaitDeadline"/> has passed.
+        /// group carry on. Does nothing until <see cref="GroupWaitDeadline"/> has passed, that is until every member the group
+        /// waits for has stopped reporting progress, or the group has waited for <see cref="MaxGroupWait"/>.
         /// </summary>
         /// <param name="cancellationToken">The cancellation token.</param>
         internal void HandleGroupWaitTimeout(CancellationToken cancellationToken)
         {
+            // Progress reports are throttled, so flush the last one that was held back.
+            if (_waitStatusPending)
+            {
+                PublishWaitStatus(false, cancellationToken);
+            }
+
             var deadline = GroupWaitDeadline;
             if (deadline is null || deadline > Environment.TickCount64)
             {
                 return;
             }
 
-            GroupWaitDeadline = null;
+            var waitedFor = Environment.TickCount64 - (_waitStartedAt ?? Environment.TickCount64);
+            _waitStartedAt = null;
+            _waitStartedAtUtc = null;
 
             if (_state is not WaitingGroupState waitingState)
             {
@@ -767,9 +901,9 @@ namespace Emby.Server.Implementations.SyncPlay
             var session = blockingSessions[0];
 
             _logger.LogWarning(
-                "Group {GroupId} waited {Waited} ms for session(s) {SessionIds} to report ready, giving up.",
+                "Group {GroupId} waited {Waited} ms for session(s) {SessionIds} to report ready and they stopped responding, giving up on them.",
                 GroupId.ToString(),
-                GroupWaitTimeout + Environment.TickCount64 - deadline.Value,
+                waitedFor,
                 string.Join(", ", blockingSessions.Select(participant => participant.Id)));
 
             if (waitingState.ResumePlaying)
@@ -778,6 +912,7 @@ namespace Emby.Server.Implementations.SyncPlay
                 // that are not ready".
                 var unpauseRequest = new UnpauseGroupRequest();
                 waitingState.HandleRequest(unpauseRequest, this, GroupStateType.Waiting, session, cancellationToken);
+                PublishWaitStatus(true, cancellationToken);
                 return;
             }
 
@@ -792,21 +927,100 @@ namespace Emby.Server.Implementations.SyncPlay
             var stateUpdate = new GroupStateUpdate(GroupStateType.Paused, PlaybackRequestType.Pause);
             var update = new SyncPlayStateUpdate(GroupId, stateUpdate);
             SendGroupUpdate(session, SyncPlayBroadcastType.AllGroup, update, cancellationToken);
+            PublishWaitStatus(true, cancellationToken);
         }
 
-        private void UpdateGroupWaitDeadline(bool startNewWaitingPeriod)
+        /// <summary>
+        /// Starts, keeps or ends the current waiting period.
+        /// </summary>
+        /// <param name="startNewWaitingPeriod">Whether every member has just been reset, starting a new waiting period.</param>
+        private void UpdateWaitPeriod(bool startNewWaitingPeriod)
         {
             if (_state.Type != GroupStateType.Waiting || !IsBuffering())
             {
-                GroupWaitDeadline = null;
+                _waitStartedAt = null;
+                _waitStartedAtUtc = null;
                 return;
             }
 
-            // A running deadline covers the waiting period as a whole, so the sessions that keep
-            // reporting buffering while they load must not push it back.
-            if (GroupWaitDeadline is null || startNewWaitingPeriod)
+            if (_waitStartedAt is null || startNewWaitingPeriod)
             {
-                GroupWaitDeadline = Environment.TickCount64 + GroupWaitTimeout;
+                _waitStartedAt = Environment.TickCount64;
+                _waitStartedAtUtc = DateTime.UtcNow;
+            }
+        }
+
+        /// <summary>
+        /// Builds the wait status of the group.
+        /// </summary>
+        /// <returns>The wait status.</returns>
+        internal GroupWaitStatusDto GetWaitStatus()
+        {
+            var now = Environment.TickCount64;
+            var isWaiting = _state.Type == GroupStateType.Waiting;
+            var members = _participants.Values
+                .Select(member => new GroupMemberStatusDto(
+                    member.UserName,
+                    member.DeviceName,
+                    !member.IsBuffering,
+                    member.IgnoreGroupWait,
+                    member.IsBuffering ? member.LoadStage : GroupMemberLoadStage.Ready,
+                    member.IsBuffering ? member.LoadProgress : 1,
+                    isWaiting && member.IsBuffering && !member.IgnoreGroupWait && now - member.LastSeen > GroupWaitTimeout / 2))
+                .ToList();
+
+            return new GroupWaitStatusDto(_state.Type, isWaiting ? _waitStartedAtUtc : null, members);
+        }
+
+        /// <summary>
+        /// Sends the wait status to every member, when it changed.
+        /// </summary>
+        /// <param name="force">Whether to skip the throttle that applies to progress-only changes.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        private void PublishWaitStatus(bool force, CancellationToken cancellationToken)
+        {
+            if (_participants.Count == 0)
+            {
+                _waitStatusPending = false;
+                return;
+            }
+
+            var status = GetWaitStatus();
+
+            // Who is ready changes what members should show, so it goes out right away;
+            // progress alone changes often and is throttled.
+            var structure = string.Join(
+                '|',
+                status.Members.Select(m => $"{m.UserName}/{m.DeviceName}/{m.IsReady}/{m.IsIgnoringWait}/{m.IsStalled}"))
+                + "|" + status.State + "|" + status.WaitingSince?.Ticks;
+            var progress = string.Join(
+                '|',
+                status.Members.Select(m => $"{m.Stage}/{(m.Progress is null ? "-" : Math.Round(m.Progress.Value, 2).ToString(System.Globalization.CultureInfo.InvariantCulture))}"));
+
+            var structureChanged = !string.Equals(structure, _lastWaitStatusStructure, StringComparison.Ordinal);
+            var progressChanged = !string.Equals(progress, _lastWaitStatusProgress, StringComparison.Ordinal);
+            if (!structureChanged && !progressChanged)
+            {
+                _waitStatusPending = false;
+                return;
+            }
+
+            var now = Environment.TickCount64;
+            if (!force && !structureChanged && now - _lastWaitStatusSentAt < WaitStatusThrottle)
+            {
+                _waitStatusPending = true;
+                return;
+            }
+
+            _lastWaitStatusStructure = structure;
+            _lastWaitStatusProgress = progress;
+            _lastWaitStatusSentAt = now;
+            _waitStatusPending = false;
+
+            var update = new SyncPlayWaitStatusUpdate(GroupId, status);
+            foreach (var sessionId in _participants.Keys.ToList())
+            {
+                _sessionManager.SendSyncPlayGroupUpdate(sessionId, update, cancellationToken);
             }
         }
     }

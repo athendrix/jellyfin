@@ -2,6 +2,7 @@
 
 using System;
 using MediaBrowser.Controller.Session;
+using MediaBrowser.Model.SyncPlay;
 
 namespace MediaBrowser.Controller.SyncPlay
 {
@@ -19,6 +20,7 @@ namespace MediaBrowser.Controller.SyncPlay
             SessionId = session.Id;
             UserId = session.UserId;
             UserName = session.UserName;
+            DeviceName = session.DeviceName;
         }
 
         /// <summary>
@@ -56,5 +58,29 @@ namespace MediaBrowser.Controller.SyncPlay
         /// </summary>
         /// <value><c>true</c> to ignore member on group wait; <c>false</c> if they're following group playback.</value>
         public bool IgnoreGroupWait { get; set; }
+
+        /// <summary>
+        /// Gets the device name of the session.
+        /// </summary>
+        /// <value>The device name.</value>
+        public string DeviceName { get; }
+
+        /// <summary>
+        /// Gets or sets what the session is doing while the group waits for it.
+        /// </summary>
+        /// <value>The load stage.</value>
+        public GroupMemberLoadStage LoadStage { get; set; } = GroupMemberLoadStage.Unknown;
+
+        /// <summary>
+        /// Gets or sets the loading progress of the session, between 0 and 1, or null when unknown.
+        /// </summary>
+        /// <value>The loading progress.</value>
+        public double? LoadProgress { get; set; }
+
+        /// <summary>
+        /// Gets or sets the time, in <see cref="System.Environment.TickCount64"/> milliseconds, the session last showed signs of life to the group.
+        /// </summary>
+        /// <value>The time the session was last seen.</value>
+        public long LastSeen { get; set; }
     }
 }

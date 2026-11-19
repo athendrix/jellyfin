@@ -332,6 +332,27 @@ public class SyncPlayController : BaseJellyfinApiController
     }
 
     /// <summary>
+    /// Report how far along the member is in loading the playing item.
+    /// </summary>
+    /// <param name="requestData">The loading progress.</param>
+    /// <response code="204">Progress recorded.</response>
+    /// <returns>A <see cref="NoContentResult"/> indicating success.</returns>
+    [HttpPost("LoadProgress")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [Authorize(Policy = Policies.SyncPlayIsInGroup)]
+    public async Task<ActionResult> SyncPlayLoadProgress(
+        [FromBody, Required] LoadProgressRequestDto requestData)
+    {
+        var currentSession = await RequestHelpers.GetSession(_sessionManager, _userManager, HttpContext).ConfigureAwait(false);
+        var syncPlayRequest = new LoadProgressGroupRequest(
+            requestData.PlaylistItemId,
+            requestData.Progress,
+            requestData.Stage);
+        _syncPlayManager.HandleRequest(currentSession, syncPlayRequest, CancellationToken.None);
+        return NoContent();
+    }
+
+    /// <summary>
     /// Request SyncPlay group to ignore member during group-wait.
     /// </summary>
     /// <param name="requestData">The settings to set.</param>
