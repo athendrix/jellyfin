@@ -129,7 +129,12 @@ public sealed class OidcSettings
         var clientId = NullIfBlank(section["ClientId"]) ?? publicUrl.Host;
         var redirectUri = new Uri(publicUrl.GetLeftPart(UriPartial.Path).TrimEnd('/') + CallbackPath);
 
-        var scopes = NullIfBlank(section["Scopes"]) ?? "openid profile";
+        var adminGroup = NullIfBlank(section["AdminGroup"]);
+        var allowedGroup = NullIfBlank(section["AllowedGroup"]);
+
+        // Group claims usually need the "groups" scope.
+        var scopes = NullIfBlank(section["Scopes"])
+            ?? (adminGroup is null && allowedGroup is null ? "openid profile" : "openid profile groups");
         if (!scopes.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("openid", StringComparer.Ordinal))
         {
             scopes = "openid " + scopes;
@@ -150,8 +155,8 @@ public sealed class OidcSettings
             Scopes = scopes,
             UsernameClaim = NullIfBlank(section["UsernameClaim"]) ?? "preferred_username",
             GroupsClaim = NullIfBlank(section["GroupsClaim"]) ?? "groups",
-            AdminGroup = NullIfBlank(section["AdminGroup"]),
-            AllowedGroup = NullIfBlank(section["AllowedGroup"]),
+            AdminGroup = adminGroup,
+            AllowedGroup = allowedGroup,
             AdminUsers = adminUsers,
             AutoCreateUsers = section.GetValue("AutoCreateUsers", true),
             ProviderName = NullIfBlank(section["ProviderName"]) ?? "SSO"

@@ -240,8 +240,9 @@ public sealed class OidcService : IDisposable
             throw new OidcException(OidcError.InvalidState, "The login is unknown or has expired.");
         }
 
-        var idToken = await ExchangeCodeAsync(code, pending.CodeVerifier, cancellationToken).ConfigureAwait(false);
-        var identity = await ValidateIdTokenAsync(idToken, pending.Nonce, cancellationToken).ConfigureAwait(false);
+        var tokens = await ExchangeCodeAsync(code, pending.CodeVerifier, cancellationToken).ConfigureAwait(false);
+        var identity = await ValidateIdTokenAsync(tokens.IdToken!, pending.Nonce, cancellationToken).ConfigureAwait(false);
+        await AddUserInfoClaimsAsync(identity, tokens.AccessToken, cancellationToken).ConfigureAwait(false);
 
         var user = await GetOrCreateUserAsync(identity, remoteEndPoint).ConfigureAwait(false);
 
@@ -345,7 +346,7 @@ public sealed class OidcService : IDisposable
         }
     }
 
-    private async Task<string> ExchangeCodeAsync(string code, string codeVerifier, CancellationToken cancellationToken)
+    private async Task<TokenResponse> ExchangeCodeAsync(string code, string codeVerifier, CancellationToken cancellationToken)
     {
         var metadata = await ConfigurationSource!.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
         if (!Uri.TryCreate(metadata.TokenEndpoint, UriKind.Absolute, out var tokenEndpoint) || tokenEndpoint.Scheme != Uri.UriSchemeHttps)
@@ -385,7 +386,85 @@ public sealed class OidcService : IDisposable
             throw new OidcException(OidcError.InvalidResponse, "The identity provider did not return an ID token.");
         }
 
-        return tokens.IdToken;
+        return tokens;
+    }
+
+    /// <summary>
+    /// Adds the claims the ID token lacks (the user name, the groups) from the userinfo endpoint.
+    /// </summary>
+    /// <remarks>
+    /// Many providers only put profile and group claims in the userinfo response. Its claims are trusted because it
+    /// is fetched from the provider over https with the access token issued alongside the verified ID token, and its
+    /// subject must match the ID token's.
+    /// </remarks>
+    private async Task AddUserInfoClaimsAsync(ClaimsIdentity identity, string? accessToken, CancellationToken cancellationToken)
+    {
+        var needsUsername = identity.FindFirst(_settings.UsernameClaim) is null;
+        var needsGroups = (_settings.AdminGroup is not null || _settings.AllowedGroup is not null)
+            && identity.FindFirst(_settings.GroupsClaim) is null;
+        if ((!needsUsername && !needsGroups) || string.IsNullOrEmpty(accessToken))
+        {
+            return;
+        }
+
+        var metadata = await ConfigurationSource!.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
+        if (!Uri.TryCreate(metadata.UserInfoEndpoint, UriKind.Absolute, out var userInfoEndpoint) || userInfoEndpoint.Scheme != Uri.UriSchemeHttps)
+        {
+            return;
+        }
+
+        System.Text.Json.JsonElement userInfo;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, userInfoEndpoint);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+            var client = _httpClientFactory.CreateClient(NamedClient.Default);
+            using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("The identity provider userinfo endpoint answered {StatusCode}.", (int)response.StatusCode);
+                return;
+            }
+
+            userInfo = await response.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            _logger.LogWarning(ex, "Could not read the identity provider userinfo endpoint.");
+            return;
+        }
+
+        // The userinfo response must be about the user the ID token is about.
+        var subject = identity.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+        if (userInfo.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !userInfo.TryGetProperty("sub", out var userInfoSubject)
+            || userInfoSubject.ValueKind != System.Text.Json.JsonValueKind.String
+            || !string.Equals(userInfoSubject.GetString(), subject, StringComparison.Ordinal))
+        {
+            throw new OidcException(OidcError.InvalidResponse, "The userinfo response is about another user than the ID token.");
+        }
+
+        if (needsUsername
+            && userInfo.TryGetProperty(_settings.UsernameClaim, out var username)
+            && username.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            identity.AddClaim(new Claim(_settings.UsernameClaim, username.GetString()!));
+        }
+
+        if (needsGroups && userInfo.TryGetProperty(_settings.GroupsClaim, out var groups))
+        {
+            if (groups.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var group in groups.EnumerateArray().Where(g => g.ValueKind == System.Text.Json.JsonValueKind.String))
+                {
+                    identity.AddClaim(new Claim(_settings.GroupsClaim, group.GetString()!));
+                }
+            }
+            else if (groups.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                identity.AddClaim(new Claim(_settings.GroupsClaim, groups.GetString()!));
+            }
+        }
     }
 
     private async Task<ClaimsIdentity> ValidateIdTokenAsync(string idToken, string nonce, CancellationToken cancellationToken)
@@ -615,5 +694,8 @@ public sealed class OidcService : IDisposable
     {
         [JsonPropertyName("id_token")]
         public string? IdToken { get; set; }
+
+        [JsonPropertyName("access_token")]
+        public string? AccessToken { get; set; }
     }
 }

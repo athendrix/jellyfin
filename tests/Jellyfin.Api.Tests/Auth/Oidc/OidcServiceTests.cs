@@ -46,6 +46,7 @@ public sealed class OidcServiceTests : IDisposable
     private readonly OidcLinkStore _links = new(null, NullLogger.Instance);
     private readonly List<Guid> _passwordsSet = new();
     private readonly List<Guid> _tokensRevoked = new();
+    private string? _userInfo;
     private Func<IDictionary<string, string>, string?>? _issueIdToken;
 
     public OidcServiceTests()
@@ -495,6 +496,37 @@ public sealed class OidcServiceTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Login_UsernameOnlyInUserInfo_IsReadFromThere()
+    {
+        _userInfo = "{\"sub\":\"subject-1\",\"username\":\"carol\",\"groups\":[\"admins\"]}";
+        using var service = CreateService(
+            form => CreateIdToken(new Dictionary<string, object> { ["nonce"] = form["nonce"] }, username: null),
+            extraSettings: new[] { ("UsernameClaim", "username"), ("AdminGroup", "admins") });
+
+        var (state, url) = await StartAsync(service);
+        Assert.Contains("groups", ParseQuery(url)["scope"], StringComparison.Ordinal);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        var user = Assert.Single(_users);
+        Assert.Equal("carol", user.Username);
+        Assert.True(user.HasPermission(PermissionKind.IsAdministrator));
+    }
+
+    [Fact]
+    public async Task Login_UserInfoAboutAnotherSubject_IsRejected()
+    {
+        _userInfo = "{\"sub\":\"someone-else\",\"username\":\"carol\"}";
+        using var service = CreateService(
+            form => CreateIdToken(new Dictionary<string, object> { ["nonce"] = form["nonce"] }, username: null),
+            extraSettings: new[] { ("UsernameClaim", "username") });
+
+        var (state, _) = await StartAsync(service);
+        var ex = await Assert.ThrowsAsync<OidcException>(() => service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None));
+        Assert.Equal(OidcError.InvalidResponse, ex.Error);
+        Assert.Empty(_users);
+    }
+
     private string CreateIdToken(
         Dictionary<string, object> claims,
         string? issuer = null,
@@ -537,7 +569,8 @@ public sealed class OidcServiceTests : IDisposable
         {
             Issuer = Issuer,
             AuthorizationEndpoint = Issuer + "/authorize",
-            TokenEndpoint = Issuer + "/token"
+            TokenEndpoint = Issuer + "/token",
+            UserInfoEndpoint = Issuer + "/userinfo"
         };
         metadata.SigningKeys.Add(_signingKey);
 
@@ -546,6 +579,15 @@ public sealed class OidcServiceTests : IDisposable
 
         var handler = new TokenEndpointHandler(request =>
         {
+            if (request.RequestUri!.AbsolutePath == "/userinfo")
+            {
+                Assert.Equal("Bearer access-token", request.Headers.Authorization?.ToString());
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(_userInfo ?? "{\"sub\":\"subject-1\"}", Encoding.UTF8, "application/json")
+                };
+            }
+
             var form = ParseForm(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
             Assert.Equal("authorization_code", form["grant_type"]);
             Assert.Equal(ClientId, form["client_id"]);
@@ -559,7 +601,7 @@ public sealed class OidcServiceTests : IDisposable
             var idToken = _issueIdToken(form);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(JsonSerializer.Serialize(new Dictionary<string, string?> { ["id_token"] = idToken }), Encoding.UTF8, "application/json")
+                Content = new StringContent(JsonSerializer.Serialize(new Dictionary<string, string?> { ["id_token"] = idToken, ["access_token"] = "access-token" }), Encoding.UTF8, "application/json")
             };
         });
 
