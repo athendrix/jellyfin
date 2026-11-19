@@ -112,7 +112,9 @@ public class SystemController : BaseJellyfinApiController
     /// <response code="403">User does not have permission to restart server.</response>
     /// <returns>No content. Server restarted.</returns>
     [HttpPost("Restart")]
-    [Authorize(Policy = Policies.LocalAccessOrRequiresElevation)]
+    // Administrators only: the local-network exception let any unauthenticated device on the network, or anybody
+    // at all behind a reverse proxy without KnownProxies, restart the server.
+    [Authorize(Policy = Policies.RequiresElevation)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public ActionResult RestartApplication()

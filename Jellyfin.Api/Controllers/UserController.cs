@@ -376,6 +376,14 @@ public class UserController : BaseJellyfinApiController
 
         if (!string.Equals(user.Username, updateUser.Name, StringComparison.Ordinal))
         {
+            // With OpenID Connect, the user name is the link to an identity provider account: a user renaming
+            // their own account to somebody else's name would get that person's account on their first login.
+            var oidc = HttpContext.RequestServices.GetService(typeof(OidcSettings)) as OidcSettings;
+            if (oidc is { Enabled: true } && !User.IsInRole(UserRoles.Administrator))
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, "Only administrators can rename users.");
+            }
+
             await _userManager.RenameUser(user.Id, user.Username, updateUser.Name).ConfigureAwait(false);
         }
 

@@ -639,7 +639,8 @@ public sealed class OidcService : IDisposable
             var displayName = _settings.DisplayNameClaims
                 .Select(claim => identity.FindFirst(claim)?.Value)
                 .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
-            _displayNames.SetDisplayName(user.Id, displayName);
+            var otherUserNames = _userManager.GetUsers().Where(u => !u.Id.Equals(user.Id)).Select(u => u.Username).ToList();
+            _displayNames.SetDisplayName(user.Id, displayName, otherUserNames);
 
             return user;
         }

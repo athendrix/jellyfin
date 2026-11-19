@@ -1,7 +1,10 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Jellyfin.Data;
 using Jellyfin.Data.Events;
+using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Controller.Authentication;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Model.Session;
 using MediaBrowser.Model.Tasks;
@@ -55,6 +58,22 @@ public class ScheduledTasksWebSocketListener : BasePeriodicWebSocketListener<IEn
             .OrderBy(i => i.Name)
             .Select(ScheduledTaskHelpers.GetTaskInfo)
             .Where(i => !i.IsHidden));
+    }
+
+    /// <summary>
+    /// Starts sending scheduled task information, to administrators only.
+    /// </summary>
+    /// <param name="message">The message.</param>
+    protected override void Start(WebSocketMessageInfo message)
+    {
+        if (!message.Connection.AuthorizationInfo.IsApiKey
+            && (message.Connection.AuthorizationInfo.User is null
+                || !message.Connection.AuthorizationInfo.User.HasPermission(PermissionKind.IsAdministrator)))
+        {
+            throw new AuthenticationException("Only admin users can retrieve scheduled task information.");
+        }
+
+        base.Start(message);
     }
 
     /// <inheritdoc />

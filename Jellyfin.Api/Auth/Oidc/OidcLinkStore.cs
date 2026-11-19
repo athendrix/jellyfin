@@ -96,6 +96,23 @@ public sealed class OidcLinkStore
         }
     }
 
+    /// <summary>
+    /// Replaces a file with new contents so that it is never left half written, even on a crash.
+    /// </summary>
+    /// <param name="path">The file.</param>
+    /// <param name="contents">The new contents.</param>
+    internal static void WriteAtomically(string path, string contents)
+    {
+        var temp = path + ".tmp";
+        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(System.Text.Encoding.UTF8.GetBytes(contents));
+            stream.Flush(true);
+        }
+
+        File.Move(temp, path, true);
+    }
+
     private Dictionary<Guid, string> Load()
     {
         if (_path is null || !File.Exists(_path))
@@ -122,11 +139,9 @@ public sealed class OidcLinkStore
             return;
         }
 
-        var temp = _path + ".tmp";
         try
         {
-            File.WriteAllText(temp, JsonSerializer.Serialize(_links.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value)));
-            File.Move(temp, _path, true);
+            WriteAtomically(_path, JsonSerializer.Serialize(_links.OrderBy(kv => kv.Key).ToDictionary(kv => kv.Key, kv => kv.Value)));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel.DataAnnotations;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Auth.Oidc;
@@ -168,7 +169,9 @@ public class OidcController : BaseJellyfinApiController
         if (!string.IsNullOrEmpty(error))
         {
             // The provider's error text is not reflected to the client, only logged.
-            _logger.LogWarning("The identity provider reported an error: {ProviderError}.", error.Length > 100 ? error[..100] : error);
+            // Logged as one line of printable characters, so the text cannot forge other log entries.
+            var printable = new string(error.Take(100).Select(c => char.IsControl(c) ? ' ' : c).ToArray());
+            _logger.LogWarning("The identity provider reported an error: {ProviderError}.", printable);
             return RedirectToLogin("oidcError", nameof(OidcError.ProviderError));
         }
 

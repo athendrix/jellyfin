@@ -589,6 +589,31 @@ public sealed class OidcServiceTests : IDisposable
         Assert.Equal("Andrew", _displayNames.GetDisplayName(Assert.Single(_users).Id));
     }
 
+    [Fact]
+    public void DisplayName_NeverSplitsACharacterAndDropsInvisibleOnes()
+    {
+        var name = OidcDisplayNameStore.Sanitize(new string('a', 63) + "\U0001F600" + "b");
+        Assert.Equal(new string('a', 63) + "\U0001F600", name);
+
+        Assert.Equal("A B", OidcDisplayNameStore.Sanitize("A\u2060\uFEFF\u00A0\u2003B\u061C"));
+        Assert.Null(OidcDisplayNameStore.Sanitize("\uD800"));
+    }
+
+    [Fact]
+    public void DisplayName_UsedByAnotherUser_IsNotUsed()
+    {
+        var store = new OidcDisplayNameStore((string?)null, NullLogger.Instance);
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+
+        store.SetDisplayName(first, "Dad");
+        store.SetDisplayName(second, "dad");
+        store.SetDisplayName(second, "andrew@example.com", new[] { "andrew@example.com" });
+
+        Assert.Equal("Dad", store.GetDisplayName(first));
+        Assert.Null(store.GetDisplayName(second));
+    }
+
     [Theory]
     [InlineData("  Andy  ", "Andy")]
     [InlineData("An\u202Edy\n", "Andy")]

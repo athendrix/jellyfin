@@ -592,7 +592,7 @@ namespace Emby.Server.Implementations.SyncPlay
             member.LastSeen = Environment.TickCount64;
 
             // Readiness is decided by the ready and buffering requests, progress only describes the way there.
-            if (!member.IsBuffering || stage == GroupMemberLoadStage.Ready)
+            if (!member.IsBuffering || stage == GroupMemberLoadStage.Ready || !Enum.IsDefined(stage))
             {
                 return;
             }
@@ -1012,7 +1012,8 @@ namespace Emby.Server.Implementations.SyncPlay
             var members = _participants.Values
                 .Select(member => new GroupMemberStatusDto(
                     member.UserName,
-                    member.DeviceName,
+                    // The device name is chosen by the client; keep it short.
+                    member.DeviceName is { Length: > 64 } ? member.DeviceName[..64] : member.DeviceName,
                     !member.IsBuffering,
                     member.IgnoreGroupWait,
                     member.IsBuffering ? member.LoadStage : GroupMemberLoadStage.Ready,
