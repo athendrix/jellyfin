@@ -23,6 +23,11 @@ namespace Jellyfin.Drawing.Skia;
 /// </summary>
 public class SkiaEncoder : IImageEncoder
 {
+    /// <summary>
+    /// The largest image, in pixels, that is decoded (100 megapixels, about 400 MB of memory).
+    /// </summary>
+    private const long MaxDecodePixels = 100_000_000;
+
     private const string SvgFormat = "svg";
 
     // The light sharpening kernel applied after resizing, see ResizeImage.
@@ -359,6 +364,16 @@ public class SkiaEncoder : IImageEncoder
         if (!File.Exists(path))
         {
             throw new FileNotFoundException("File not found", path);
+        }
+
+        // A small file can declare enormous dimensions, and decoding allocates width x height pixels up front.
+        // Read the declared size first (this decodes no pixels) and refuse anything unreasonably large.
+        using (var probe = SKCodec.Create(NormalizePath(path)))
+        {
+            if (probe is not null && (long)probe.Info.Width * probe.Info.Height > MaxDecodePixels)
+            {
+                throw new ArgumentException($"Image {path} is too large to decode ({probe.Info.Width}x{probe.Info.Height}).");
+            }
         }
 
         var requiresTransparencyHack = _transparentImageTypes.Contains(Path.GetExtension(path));

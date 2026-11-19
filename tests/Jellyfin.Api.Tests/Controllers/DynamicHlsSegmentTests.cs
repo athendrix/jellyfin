@@ -84,6 +84,7 @@ public sealed class DynamicHlsSegmentTests : IAsyncLifetime
         };
         var library = new Mock<ILibraryManager>();
         library.Setup(x => x.GetItemById<BaseItem>(_item.Id)).Returns(_item);
+        library.Setup(l => l.GetItemById<BaseItem>(_item.Id, It.IsAny<Guid>())).Returns(_item);
         _fixture.Inject(library.Object);
         var sources = new Mock<IMediaSourceManager>();
         sources.Setup(x => x.GetPlaybackMediaSources(_item, null, false, false, It.IsAny<CancellationToken>()))

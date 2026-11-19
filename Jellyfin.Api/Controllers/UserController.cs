@@ -294,6 +294,12 @@ public class UserController : BaseJellyfinApiController
 
         if (request.ResetPassword)
         {
+            // Resetting removes the password: only an administrator may do that, not a user (or a stolen token).
+            if (!User.IsInRole(UserRoles.Administrator))
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, "Only administrators can reset passwords.");
+            }
+
             await _userManager.ResetPassword(user.Id).ConfigureAwait(false);
         }
         else

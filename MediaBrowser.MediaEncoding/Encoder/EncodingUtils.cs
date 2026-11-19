@@ -15,7 +15,8 @@ namespace MediaBrowser.MediaEncoding.Encoder
         {
             if (protocol != MediaProtocol.File)
             {
-                return string.Format(CultureInfo.InvariantCulture, "\"{0}\"", inputFile);
+                // Escaped: a URL (from a .strm file or an M3U playlist) could otherwise close the quotes and add arguments.
+                return string.Format(CultureInfo.InvariantCulture, "\"{0}\"", inputFile.EscapeProcessArgument());
             }
 
             return GetFileInputArgument(inputFile, inputPrefix);
@@ -25,7 +26,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
         {
             if (protocol != MediaProtocol.File)
             {
-                return string.Format(CultureInfo.InvariantCulture, "\"{0}\"", inputFiles[0]);
+                return string.Format(CultureInfo.InvariantCulture, "\"{0}\"", inputFiles[0].EscapeProcessArgument());
             }
 
             return GetConcatInputArgument(inputFiles, inputPrefix);
@@ -62,7 +63,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
         {
             if (path.Contains("://", StringComparison.Ordinal))
             {
-                return string.Format(CultureInfo.InvariantCulture, "\"{0}\"", path);
+                return string.Format(CultureInfo.InvariantCulture, "\"{0}\"", path.EscapeProcessArgument());
             }
 
             path = path.EscapeProcessArgument();

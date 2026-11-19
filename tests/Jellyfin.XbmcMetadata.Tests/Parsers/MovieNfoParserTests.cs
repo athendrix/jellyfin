@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using Jellyfin.Data.Enums;
@@ -59,6 +60,8 @@ namespace Jellyfin.XbmcMetadata.Tests.Parsers
                 });
 
             var directoryService = new Mock<IDirectoryService>();
+            directoryService.Setup(x => x.GetFile(It.IsAny<string>()))
+                .Returns((string path) => new FileSystemMetadata { Exists = true, FullName = path });
             _localImageFileMetadata = new FileSystemMetadata()
             {
                 Exists = true,
@@ -189,9 +192,81 @@ namespace Jellyfin.XbmcMetadata.Tests.Parsers
             Assert.Single(backdrop);
             Assert.Equal("https://assets.fanart.tv/fanart/movies/141052/moviebackground/justice-league-5793f518c6d6e.jpg", backdrop[0].Url);
 
-            // Local Image - contains only one item depending on operating system
-            Assert.Single(result.Images);
-            Assert.Equal(_localImageFileMetadata.Name, result.Images[0].FileInfo.Name);
+            // Local images outside the folder of the nfo file are ignored: the test nfo is not next to them.
+            Assert.Empty(result.Images);
+        }
+
+        [Fact]
+        public void Fetch_LocalArtworkNextToNfo_IsUsed()
+        {
+            var directory = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var poster = Path.Combine(directory, "poster.jpg");
+                var nfo = Path.Combine(directory, "movie.nfo");
+                File.WriteAllText(nfo, $"<movie><title>x</title><thumb aspect=\"poster\">{poster}</thumb></movie>");
+
+                var result = new MetadataResult<Video>() { Item = new Movie() };
+                _parser.Fetch(result, nfo, CancellationToken.None);
+
+                Assert.Equal(poster, Assert.Single(result.Images).FileInfo.FullName);
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+
+        [Theory]
+        [InlineData("/etc/passwd")]
+        [InlineData("/config/data/jellyfin.db")]
+        [InlineData("../../config/system.xml")]
+        public void Fetch_LocalArtworkOutsideNfoFolder_IsIgnored(string path)
+        {
+            var directory = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var nfo = Path.Combine(directory, "movie.nfo");
+                var target = Path.IsPathRooted(path) ? path : Path.Combine(directory, path);
+                File.WriteAllText(nfo, $"<movie><title>x</title><thumb aspect=\"poster\">{target}</thumb></movie>");
+
+                var result = new MetadataResult<Video>() { Item = new Movie() };
+                _parser.Fetch(result, nfo, CancellationToken.None);
+
+                Assert.Empty(result.Images);
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+
+        [Theory]
+        [InlineData("http://169.254.169.254/latest/meta-data/x.jpg", false)]
+        [InlineData("http://127.0.0.1:8096/x.jpg", false)]
+        [InlineData("http://10.0.0.5/x.jpg", false)]
+        [InlineData("http://192.168.1.1/x.jpg", false)]
+        [InlineData("http://[::1]/x.jpg", false)]
+        [InlineData("http://localhost/x.jpg", false)]
+        [InlineData("ftp://example.com/x.jpg", false)]
+        [InlineData("https://image.tmdb.org/t/p/original/x.jpg", true)]
+        public void Fetch_RemoteArtwork_OnlyPublicWebUrls(string url, bool allowed)
+        {
+            var directory = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var nfo = Path.Combine(directory, "movie.nfo");
+                File.WriteAllText(nfo, $"<movie><title>x</title><thumb aspect=\"poster\">{url}</thumb></movie>");
+
+                var result = new MetadataResult<Video>() { Item = new Movie() };
+                _parser.Fetch(result, nfo, CancellationToken.None);
+
+                Assert.Equal(allowed ? 1 : 0, result.RemoteImages.Count);
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
         }
 
         [Theory]

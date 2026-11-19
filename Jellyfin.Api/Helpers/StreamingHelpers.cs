@@ -107,7 +107,8 @@ public static class StreamingHelpers
                                           ?? state.SupportedSubtitleCodecs.FirstOrDefault();
         }
 
-        var item = libraryManager.GetItemById<BaseItem>(streamingRequest.Id)
+        // The caller must be allowed to see the item (library access, parental rating). API keys have no user.
+        var item = libraryManager.GetItemById<BaseItem>(streamingRequest.Id, httpContext.User.GetUserId())
             ?? throw new ResourceNotFoundException();
 
         state.IsInputVideo = item.MediaType == MediaType.Video;

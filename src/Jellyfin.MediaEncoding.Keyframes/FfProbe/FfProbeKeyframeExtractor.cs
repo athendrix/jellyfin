@@ -20,6 +20,12 @@ public static class FfProbeKeyframeExtractor
     /// <returns>An instance of <see cref="KeyframeData"/>.</returns>
     public static KeyframeData GetKeyframeData(string ffProbePath, string filePath)
     {
+        // The path is passed in double quotes: one containing a quote could add ffprobe arguments (such as -o).
+        if (filePath.Contains('"', StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The file path contains a double quote.", nameof(filePath));
+        }
+
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo

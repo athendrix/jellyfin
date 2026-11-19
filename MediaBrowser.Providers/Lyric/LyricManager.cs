@@ -398,7 +398,16 @@ public class LyricManager : ILyricManager
             }
 
             var savePaths = new List<string>();
-            var saveFileName = Path.GetFileNameWithoutExtension(audio.Path) + "." + format.ReplaceLineEndings(string.Empty).ToLowerInvariant();
+            var extension = format.ReplaceLineEndings(string.Empty).ToLowerInvariant();
+
+            // The extension comes from the uploaded file name: anything but a lyric format (.strm, .nfo, ...) saved
+            // next to the media would be picked up as something else by the next library scan.
+            if (extension is not ("lrc" or "elrc" or "txt"))
+            {
+                throw new ArgumentException($"Unsupported lyric format: {extension}", nameof(format));
+            }
+
+            var saveFileName = Path.GetFileNameWithoutExtension(audio.Path) + "." + extension;
 
             if (saveInMediaFolder)
             {

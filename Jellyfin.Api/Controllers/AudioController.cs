@@ -8,6 +8,7 @@ using Jellyfin.Api.Models.StreamingDtos;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Dlna;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -87,6 +88,8 @@ public class AudioController : BaseJellyfinApiController
     /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
     [HttpGet("{itemId}/stream", Name = "GetAudioStream")]
     [HttpHead("{itemId}/stream", Name = "HeadAudioStream")]
+    // Clients send their token in the ApiKey query parameter of stream URLs.
+    [Authorize]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesAudioFile]
     public async Task<ActionResult> GetAudioStream(
@@ -251,6 +254,8 @@ public class AudioController : BaseJellyfinApiController
     /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
     [HttpGet("{itemId}/stream.{container}", Name = "GetAudioStreamByContainer")]
     [HttpHead("{itemId}/stream.{container}", Name = "HeadAudioStreamByContainer")]
+    // Clients send their token in the ApiKey query parameter of stream URLs.
+    [Authorize]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesAudioFile]
     public async Task<ActionResult> GetAudioStreamByContainer(

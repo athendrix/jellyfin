@@ -115,6 +115,7 @@ public class SubtitleControllerTests
 
         var libraryManager = new Mock<ILibraryManager>();
         libraryManager.Setup(l => l.GetItemById<BaseItem>(_itemId)).Returns(item);
+        libraryManager.Setup(l => l.GetItemById<BaseItem>(_itemId, It.IsAny<Guid>())).Returns(item);
 
         var mediaSourceManager = new Mock<IMediaSourceManager>();
         mediaSourceManager.Setup(m => m.GetStaticMediaSources(item, false, null)).Returns([mediaSource]);
@@ -132,7 +133,10 @@ public class SubtitleControllerTests
             mediaSourceManager.Object,
             Mock.Of<IProviderManager>(),
             fileSystem.Object,
-            NullLogger<SubtitleController>.Instance);
+            NullLogger<SubtitleController>.Instance)
+        {
+            ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext { HttpContext = new Microsoft.AspNetCore.Http.DefaultHttpContext() }
+        };
     }
 
     [Theory]

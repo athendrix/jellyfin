@@ -34,6 +34,8 @@ namespace MediaBrowser.XbmcMetadata.Parsers
         private readonly IUserManager _userManager;
         private readonly IUserDataManager _userDataManager;
         private readonly IDirectoryService _directoryService;
+        private string? _metadataDirectory;
+
         private Dictionary<string, string> _validProviderIds;
 
         /// <summary>
@@ -94,6 +96,7 @@ namespace MediaBrowser.XbmcMetadata.Parsers
 
             ArgumentException.ThrowIfNullOrEmpty(metadataFile);
 
+            _metadataDirectory = Path.GetDirectoryName(Path.GetFullPath(metadataFile));
             _validProviderIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             var idInfos = ProviderManager.GetExternalIdInfos(item.Item);
@@ -705,6 +708,16 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                     return;
                 }
 
+                // Local artwork must be next to the nfo file (or below it). The image endpoints serve image files as
+                // they are, so any other path (the server database, configuration, system files) could be read.
+                var fullPath = Path.GetFullPath(uri.LocalPath);
+                if (_metadataDirectory is null
+                    || !fullPath.StartsWith(Path.TrimEndingDirectorySeparator(_metadataDirectory) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                {
+                    Logger.LogWarning("Ignoring artwork {Path} specified in nfo file for {ItemName}: it is outside the folder of the nfo file.", val, itemResult.Item.Name);
+                    return;
+                }
+
                 var fileSystemMetadata = _directoryService.GetFile(val);
                 // nonexistent file returns null
                 if (fileSystemMetadata is null || !fileSystemMetadata.Exists)
@@ -727,8 +740,46 @@ namespace MediaBrowser.XbmcMetadata.Parsers
                     return;
                 }
 
+                // The server downloads remote artwork itself: an nfo file must not make it request internal services.
+                if (!IsPublicWebUrl(uri))
+                {
+                    Logger.LogWarning("Ignoring artwork {Url} specified in nfo file for {ItemName}: only public http(s) URLs are allowed.", val, itemResult.Item.Name);
+                    return;
+                }
+
                 itemResult.RemoteImages.Add((uri.ToString(), imageType));
             }
+        }
+
+        private static bool IsPublicWebUrl(Uri uri)
+        {
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            {
+                return false;
+            }
+
+            if (System.Net.IPAddress.TryParse(uri.IdnHost.Trim('[', ']'), out var address))
+            {
+                if (address.IsIPv4MappedToIPv6)
+                {
+                    address = address.MapToIPv4();
+                }
+
+                var bytes = address.GetAddressBytes();
+                return !(System.Net.IPAddress.IsLoopback(address)
+                    || address.IsIPv6LinkLocal
+                    || address.IsIPv6SiteLocal
+                    || address.IsIPv6UniqueLocal
+                    || (bytes.Length == 4 && (bytes[0] == 10
+                        || bytes[0] == 0
+                        || (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127)
+                        || (bytes[0] == 169 && bytes[1] == 254)
+                        || (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
+                        || (bytes[0] == 192 && bytes[1] == 168))));
+            }
+
+            // Names without a dot (localhost, intranet hosts) are internal.
+            return uri.IdnHost.Contains('.', StringComparison.Ordinal);
         }
 
         private void FetchFromFileInfoNode(XmlReader parentReader, T item)

@@ -195,7 +195,8 @@ namespace MediaBrowser.Controller.MediaEncoding
         /// The level validation regex string.
         /// This regular expression matches strings representing a double.
         /// </summary>
-        [GeneratedRegex(LevelValidationRegexStr)]
+        // Anchored: the value must be a level and nothing else (the attribute form of the pattern is anchored implicitly).
+        [GeneratedRegex("^" + LevelValidationRegexStr + "$")]
         public static partial Regex LevelValidationRegex();
 
         [GeneratedRegex(@"\s+")]
