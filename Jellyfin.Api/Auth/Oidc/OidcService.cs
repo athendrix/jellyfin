@@ -402,14 +402,21 @@ public sealed class OidcService : IDisposable
         var needsUsername = identity.FindFirst(_settings.UsernameClaim) is null;
         var needsGroups = (_settings.AdminGroup is not null || _settings.AllowedGroup is not null)
             && identity.FindFirst(_settings.GroupsClaim) is null;
-        if ((!needsUsername && !needsGroups) || string.IsNullOrEmpty(accessToken))
+        if (!needsUsername && !needsGroups)
         {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(accessToken))
+        {
+            _logger.LogWarning("The ID token lacks claims the login needs, and the identity provider returned no access token to ask its userinfo endpoint with.");
             return;
         }
 
         var metadata = await ConfigurationSource!.GetConfigurationAsync(cancellationToken).ConfigureAwait(false);
         if (!Uri.TryCreate(metadata.UserInfoEndpoint, UriKind.Absolute, out var userInfoEndpoint) || userInfoEndpoint.Scheme != Uri.UriSchemeHttps)
         {
+            _logger.LogWarning("The ID token lacks claims the login needs, and the identity provider publishes no https userinfo endpoint.");
             return;
         }
 
@@ -449,6 +456,14 @@ public sealed class OidcService : IDisposable
             && username.ValueKind == System.Text.Json.JsonValueKind.String)
         {
             identity.AddClaim(new Claim(_settings.UsernameClaim, username.GetString()!));
+        }
+        else if (needsUsername)
+        {
+            // Only the names, never the values, which can be personal data.
+            _logger.LogWarning(
+                "The userinfo response has no string '{UsernameClaim}' claim either. Its claims are: {Claims}.",
+                _settings.UsernameClaim,
+                string.Join(", ", userInfo.EnumerateObject().Select(p => $"{p.Name} ({p.Value.ValueKind})")));
         }
 
         if (needsGroups && userInfo.TryGetProperty(_settings.GroupsClaim, out var groups))
@@ -536,7 +551,11 @@ public sealed class OidcService : IDisposable
         var username = identity.FindFirst(_settings.UsernameClaim)?.Value?.Trim();
         if (string.IsNullOrEmpty(username))
         {
-            throw new OidcException(OidcError.MissingUsername, $"The ID token has no '{_settings.UsernameClaim}' claim.");
+            throw new OidcException(
+                OidcError.MissingUsername,
+                $"Neither the ID token nor the userinfo response has a '{_settings.UsernameClaim}' claim (Oidc:UsernameClaim). "
+                + $"The ID token's claims are: {string.Join(", ", identity.Claims.Select(c => c.Type).Distinct())}. "
+                + $"Requested scopes: {_settings.Scopes}.");
         }
 
         var subject = identity.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
