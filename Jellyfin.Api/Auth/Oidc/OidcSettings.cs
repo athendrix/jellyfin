@@ -95,6 +95,17 @@ public sealed class OidcSettings
     public IReadOnlySet<string> AdminUsers { get; private init; } = new HashSet<string>();
 
     /// <summary>
+    /// Gets a value indicating whether library access follows the identity provider's groups: at every login, a user
+    /// gets access to exactly the libraries named like one of their groups.
+    /// </summary>
+    public bool LibrariesFromGroups { get; private init; }
+
+    /// <summary>
+    /// Gets a value indicating whether administrator rights come from the identity provider (AdminUsers or AdminGroup).
+    /// </summary>
+    public bool AdministratorsFromProvider => AdminUsers.Count > 0 || AdminGroup is not null;
+
+    /// <summary>
     /// Gets a value indicating whether users that do not exist yet are created on their first login.
     /// </summary>
     public bool AutoCreateUsers { get; private init; } = true;
@@ -136,10 +147,11 @@ public sealed class OidcSettings
 
         var adminGroup = NullIfBlank(section["AdminGroup"]);
         var allowedGroup = NullIfBlank(section["AllowedGroup"]);
+        var librariesFromGroups = section.GetValue("LibrariesFromGroups", false);
 
         // Group claims usually need the "groups" scope.
         var scopes = NullIfBlank(section["Scopes"])
-            ?? (adminGroup is null && allowedGroup is null ? "openid profile" : "openid profile groups");
+            ?? (adminGroup is null && allowedGroup is null && !librariesFromGroups ? "openid profile" : "openid profile groups");
         if (!scopes.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("openid", StringComparer.Ordinal))
         {
             scopes = "openid " + scopes;
@@ -164,6 +176,7 @@ public sealed class OidcSettings
             GroupsClaim = NullIfBlank(section["GroupsClaim"]) ?? "groups",
             AdminGroup = adminGroup,
             AllowedGroup = allowedGroup,
+            LibrariesFromGroups = librariesFromGroups,
             AdminUsers = adminUsers,
             AutoCreateUsers = section.GetValue("AutoCreateUsers", true),
             ProviderName = NullIfBlank(section["ProviderName"]) ?? "SSO"

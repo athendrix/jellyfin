@@ -390,6 +390,12 @@ public class UserController : BaseJellyfinApiController
                 return StatusCode(StatusCodes.Status403Forbidden, "Only administrators can rename users.");
             }
 
+            // The name of a user managed by the identity provider follows the identity provider.
+            if (HttpContext.RequestServices.GetService(typeof(OidcService)) is OidcService oidcService && oidcService.IsManaged(user.Id))
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, "This user's name is managed by the identity provider.");
+            }
+
             await _userManager.RenameUser(user.Id, user.Username, updateUser.Name).ConfigureAwait(false);
         }
 
@@ -441,6 +447,22 @@ public class UserController : BaseJellyfinApiController
         if (user is null)
         {
             return NotFound();
+        }
+
+        // Administrator rights and library access of a user managed by the identity provider follow the identity
+        // provider (when so configured): keep them as they are.
+        if (HttpContext.RequestServices.GetService(typeof(OidcService)) is OidcService oidcService && oidcService.IsManaged(user.Id))
+        {
+            if (oidcService.Settings.AdministratorsFromProvider)
+            {
+                newPolicy.IsAdministrator = user.HasPermission(PermissionKind.IsAdministrator);
+            }
+
+            if (oidcService.Settings.LibrariesFromGroups)
+            {
+                newPolicy.EnableAllFolders = user.HasPermission(PermissionKind.EnableAllFolders);
+                newPolicy.EnabledFolders = user.GetPreferenceValues<Guid>(PreferenceKind.EnabledFolders);
+            }
         }
 
         // If removing admin access

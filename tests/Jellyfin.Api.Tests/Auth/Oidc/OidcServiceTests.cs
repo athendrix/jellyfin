@@ -47,6 +47,10 @@ public sealed class OidcServiceTests : IDisposable
     private readonly OidcDisplayNameStore _displayNames = new((string?)null, NullLogger.Instance);
     private readonly List<Guid> _passwordsSet = new();
     private readonly List<Guid> _tokensRevoked = new();
+    private readonly Mock<ILibraryManager> _libraryManager = new();
+    private static readonly Guid _moviesId = Guid.NewGuid();
+    private static readonly Guid _kidsId = Guid.NewGuid();
+    private static readonly Guid _showsId = Guid.NewGuid();
     private string? _userInfo;
     private Func<IDictionary<string, string>, string?>? _issueIdToken;
 
@@ -78,6 +82,15 @@ public sealed class OidcServiceTests : IDisposable
             .Callback((Guid id, string _) => _tokensRevoked.Add(id))
             .Returns(Task.CompletedTask);
         _networkManager.Setup(m => m.IsInLocalNetwork(It.IsAny<string>())).Returns(true);
+        _userManager.Setup(m => m.RenameUser(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Callback((Guid id, string _, string newName) => _users.First(u => u.Id.Equals(id)).Username = newName)
+            .Returns(Task.CompletedTask);
+        _libraryManager.Setup(m => m.GetVirtualFolders()).Returns(new List<MediaBrowser.Model.Entities.VirtualFolderInfo>
+        {
+            new() { Name = "Movies", ItemId = _moviesId.ToString("N") },
+            new() { Name = "Kids Movies", ItemId = _kidsId.ToString("N") },
+            new() { Name = "Shows", ItemId = _showsId.ToString("N") }
+        });
 
         _sessionManager.Setup(m => m.AuthenticateDirect(It.IsAny<AuthenticationRequest>()))
             .ReturnsAsync((AuthenticationRequest request) => new AuthenticationResult { AccessToken = "token-for-" + request.DeviceId });
@@ -437,6 +450,49 @@ public sealed class OidcServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Login_LinkedAccountWhoseNameChanged_IsRenamed()
+    {
+        var username = "alice";
+        using var service = CreateService(form => CreateIdToken(new Dictionary<string, object> { ["nonce"] = form["nonce"] }, username: username));
+
+        var (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+        var user = Assert.Single(_users);
+
+        // Same identity provider account (subject), new name: the account follows it.
+        username = "alice.smith";
+        (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        Assert.Same(user, Assert.Single(_users));
+        Assert.Equal("alice.smith", user.Username);
+        Assert.True(service.IsManaged(user.Id));
+    }
+
+    [Fact]
+    public async Task Login_LibrariesFromGroups_GrantsExactlyTheMatchingLibraries()
+    {
+        var groups = new[] { "movies", "Kids Movies", "unrelated" };
+        using var service = CreateService(
+            form => CreateIdToken(new Dictionary<string, object> { ["nonce"] = form["nonce"], ["groups"] = groups }),
+            extraSettings: new[] { ("LibrariesFromGroups", "true") });
+
+        var (state, url) = await StartAsync(service);
+        Assert.Contains("groups", ParseQuery(url)["scope"], StringComparison.Ordinal);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+
+        var user = Assert.Single(_users);
+        Assert.False(user.HasPermission(PermissionKind.EnableAllFolders));
+        Assert.Equal(new[] { _moviesId, _kidsId }.OrderBy(i => i), user.GetPreferenceValues<Guid>(PreferenceKind.EnabledFolders).OrderBy(i => i));
+
+        // Removed from a group in the identity provider: the library goes away at the next login.
+        groups = new[] { "Shows" };
+        (state, _) = await StartAsync(service);
+        await service.CompleteLoginAsync(state, state, "the-code", "10.0.0.2", CancellationToken.None);
+        Assert.Equal(new[] { _showsId }, user.GetPreferenceValues<Guid>(PreferenceKind.EnabledFolders));
+    }
+
+    [Fact]
     public async Task Login_CreatedUser_HasNoLibraryAccess()
     {
         using var service = CreateService();
@@ -710,6 +766,7 @@ public sealed class OidcServiceTests : IDisposable
         return new OidcService(
             settings,
             _userManager.Object,
+            _libraryManager.Object,
             _sessionManager.Object,
             factory.Object,
             _networkManager.Object,

@@ -5,13 +5,16 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Auth.Oidc;
+using Jellyfin.Api.Constants;
 using Jellyfin.Api.Models.OidcDtos;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Authentication;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Net;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -73,6 +76,28 @@ public class OidcController : BaseJellyfinApiController
             Enabled = settings.Enabled,
             PasswordLoginEnabled = settings.PasswordLoginEnabled,
             ProviderName = settings.Enabled ? settings.ProviderName : null
+        };
+    }
+
+    /// <summary>
+    /// Gets which settings of a user are managed by the identity provider, for the user editor.
+    /// </summary>
+    /// <param name="userId">The user id.</param>
+    /// <response code="200">Managed settings returned.</response>
+    /// <returns>The managed settings.</returns>
+    [HttpGet("Users/{userId}")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<OidcManagedUserDto> GetManagedUser([FromRoute, Required] Guid userId)
+    {
+        var managed = _oidcService.IsManaged(userId);
+        var settings = _oidcService.Settings;
+        return new OidcManagedUserDto
+        {
+            Managed = managed,
+            Name = managed,
+            Administrator = managed && settings.AdministratorsFromProvider,
+            Libraries = managed && settings.LibrariesFromGroups
         };
     }
 

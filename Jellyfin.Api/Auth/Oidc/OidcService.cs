@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Jellyfin.Data;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Authentication;
@@ -56,6 +57,7 @@ public sealed class OidcService : IDisposable
 
     private readonly OidcSettings _settings;
     private readonly IUserManager _userManager;
+    private readonly ILibraryManager _libraryManager;
     private readonly ISessionManager _sessionManager;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly INetworkManager _networkManager;
@@ -76,6 +78,7 @@ public sealed class OidcService : IDisposable
     /// </summary>
     /// <param name="settings">The OpenID Connect settings.</param>
     /// <param name="userManager">The user manager.</param>
+    /// <param name="libraryManager">The library manager.</param>
     /// <param name="sessionManager">The session manager.</param>
     /// <param name="httpClientFactory">The HTTP client factory.</param>
     /// <param name="networkManager">The network manager.</param>
@@ -85,6 +88,7 @@ public sealed class OidcService : IDisposable
     public OidcService(
         OidcSettings settings,
         IUserManager userManager,
+        ILibraryManager libraryManager,
         ISessionManager sessionManager,
         IHttpClientFactory httpClientFactory,
         INetworkManager networkManager,
@@ -94,6 +98,7 @@ public sealed class OidcService : IDisposable
         : this(
             settings,
             userManager,
+            libraryManager,
             sessionManager,
             httpClientFactory,
             networkManager,
@@ -110,6 +115,7 @@ public sealed class OidcService : IDisposable
     /// </summary>
     /// <param name="settings">The OpenID Connect settings.</param>
     /// <param name="userManager">The user manager.</param>
+    /// <param name="libraryManager">The library manager.</param>
     /// <param name="sessionManager">The session manager.</param>
     /// <param name="httpClientFactory">The HTTP client factory.</param>
     /// <param name="networkManager">The network manager.</param>
@@ -121,6 +127,7 @@ public sealed class OidcService : IDisposable
     internal OidcService(
         OidcSettings settings,
         IUserManager userManager,
+        ILibraryManager libraryManager,
         ISessionManager sessionManager,
         IHttpClientFactory httpClientFactory,
         INetworkManager networkManager,
@@ -132,6 +139,7 @@ public sealed class OidcService : IDisposable
     {
         _settings = settings;
         _userManager = userManager;
+        _libraryManager = libraryManager;
         _sessionManager = sessionManager;
         _httpClientFactory = httpClientFactory;
         _networkManager = networkManager;
@@ -280,6 +288,14 @@ public sealed class OidcService : IDisposable
     }
 
     /// <summary>
+    /// Gets whether a user is managed by the identity provider (linked to an identity provider account).
+    /// </summary>
+    /// <param name="userId">The user id.</param>
+    /// <returns><c>true</c> when the user's account name, display name and, when configured, administrator rights and
+    /// library access come from the identity provider.</returns>
+    public bool IsManaged(Guid userId) => _settings.Enabled && _links.FindKey(userId) is not null;
+
+    /// <summary>
     /// Exchanges a one-time code for the session it stands for.
     /// </summary>
     /// <param name="handoffCode">The one-time code.</param>
@@ -407,7 +423,7 @@ public sealed class OidcService : IDisposable
     private async Task AddUserInfoClaimsAsync(ClaimsIdentity identity, string? accessToken, CancellationToken cancellationToken)
     {
         var needsUsername = identity.FindFirst(_settings.UsernameClaim) is null;
-        var needsGroups = (_settings.AdminGroup is not null || _settings.AllowedGroup is not null)
+        var needsGroups = (_settings.AdminGroup is not null || _settings.AllowedGroup is not null || _settings.LibrariesFromGroups)
             && identity.FindFirst(_settings.GroupsClaim) is null;
         var needsDisplayName = _settings.DisplayNameClaims.All(claim => identity.FindFirst(claim) is null);
         if (!needsUsername && !needsGroups && !needsDisplayName)
@@ -634,6 +650,7 @@ public sealed class OidcService : IDisposable
             }
 
             await ApplyAdministratorAsync(user, groups).ConfigureAwait(false);
+            await ApplyLibrariesAsync(user, groups).ConfigureAwait(false);
 
             // The name shown for the user follows the identity provider at every login.
             var displayName = _settings.DisplayNameClaims
@@ -668,6 +685,22 @@ public sealed class OidcService : IDisposable
                 _logger.LogInformation("Linked user {UserName} to identity provider account {Account}.", user.Username, accountKey);
             }
         }
+        else if (_links.FindUser(accountKey) is Guid linkedId && _userManager.GetUserById(linkedId) is User linkedUser)
+        {
+            // The account follows the identity provider account: its name changed there, so rename it here.
+            var oldName = linkedUser.Username;
+            try
+            {
+                await _userManager.RenameUser(linkedUser.Id, oldName, username).ConfigureAwait(false);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new OidcException(OidcError.InvalidUsername, $"'{username}' is not a valid Jellyfin user name.", ex);
+            }
+
+            _logger.LogInformation("Renamed user {OldName} to {NewName} to follow the identity provider.", oldName, username);
+            user = _userManager.GetUserById(linkedUser.Id) ?? linkedUser;
+        }
         else
         {
             if (!_settings.AutoCreateUsers)
@@ -692,9 +725,9 @@ public sealed class OidcService : IDisposable
             _logger.LogInformation("Created user {UserName} on their first OpenID Connect login. It has access to no library yet.", username);
         }
 
-        // The user name decides the account. The link only stops another identity provider account from taking over
-        // an account that is already linked; an identity provider account whose name changed (or whose user name claim
-        // was reconfigured) moves to the account matching its new name.
+        // The account is bound to the identity provider account (issuer and subject). An unlinked account with the same
+        // name is adopted, which converts existing accounts on their first login and repairs a login that went to the
+        // wrong account; an account linked to another identity provider account is never taken over.
         var previousUserId = _links.FindUser(accountKey);
         if (previousUserId is not null && !previousUserId.Value.Equals(user.Id))
         {
@@ -707,6 +740,33 @@ public sealed class OidcService : IDisposable
 
         _links.Link(user.Id, accountKey);
         return user;
+    }
+
+    private async Task ApplyLibrariesAsync(User user, IReadOnlySet<string> groups)
+    {
+        if (!_settings.LibrariesFromGroups)
+        {
+            return;
+        }
+
+        // Exactly the libraries named like one of the user's groups (names compared without regard to case).
+        var libraries = _libraryManager.GetVirtualFolders()
+            .Where(folder => folder.Name is not null && groups.Contains(folder.Name, StringComparer.OrdinalIgnoreCase))
+            .Select(folder => Guid.TryParse(folder.ItemId, out var id) ? id : Guid.Empty)
+            .Where(id => !id.IsEmpty())
+            .OrderBy(id => id)
+            .ToArray();
+
+        var current = user.GetPreferenceValues<Guid>(PreferenceKind.EnabledFolders).OrderBy(id => id).ToArray();
+        if (!user.HasPermission(PermissionKind.EnableAllFolders) && current.SequenceEqual(libraries))
+        {
+            return;
+        }
+
+        user.SetPermission(PermissionKind.EnableAllFolders, false);
+        user.SetPreference(PreferenceKind.EnabledFolders, libraries);
+        await _userManager.UpdateUserAsync(user).ConfigureAwait(false);
+        _logger.LogInformation("Library access of {UserName} set from identity provider groups: {Count} libraries.", user.Username, libraries.Length);
     }
 
     private async Task ApplyAdministratorAsync(User user, IReadOnlySet<string> groups)
