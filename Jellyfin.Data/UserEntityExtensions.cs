@@ -191,7 +191,9 @@ public static class UserEntityExtensions
         entity.Permissions.Add(new Permission(PermissionKind.IsHidden, true));
         entity.Permissions.Add(new Permission(PermissionKind.EnableAllChannels, true));
         entity.Permissions.Add(new Permission(PermissionKind.EnableAllDevices, true));
-        entity.Permissions.Add(new Permission(PermissionKind.EnableAllFolders, true));
+        // A new user sees no library until an administrator gives it access to some: granting everything by default
+        // exposes every library, whatever its content, to accounts made for children or guests.
+        entity.Permissions.Add(new Permission(PermissionKind.EnableAllFolders, false));
         entity.Permissions.Add(new Permission(PermissionKind.EnableContentDeletion, false));
         entity.Permissions.Add(new Permission(PermissionKind.EnableContentDownloading, true));
         entity.Permissions.Add(new Permission(PermissionKind.EnableMediaConversion, true));

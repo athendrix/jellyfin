@@ -765,6 +765,8 @@ namespace Jellyfin.Server.Implementations.Users
                 newUser.SetPermission(PermissionKind.IsAdministrator, true);
                 newUser.SetPermission(PermissionKind.EnableContentDeletion, true);
                 newUser.SetPermission(PermissionKind.EnableRemoteControlOfOtherUsers, true);
+                // The server's first administrator, created by the setup wizard, sees all libraries.
+                newUser.SetPermission(PermissionKind.EnableAllFolders, true);
 
                 dbContext.Users.Add(newUser);
                 await dbContext.SaveChangesAsync().ConfigureAwait(false);
