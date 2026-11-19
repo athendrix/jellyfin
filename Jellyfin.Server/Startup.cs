@@ -8,6 +8,7 @@ using System.Net.Mime;
 using System.Text;
 using Emby.Server.Implementations.EntryPoints;
 using Emby.Server.Implementations.Localization;
+using Jellyfin.Api.Auth.Oidc;
 using Jellyfin.Api.Middleware;
 using Jellyfin.Database.Implementations;
 using Jellyfin.LiveTv.Extensions;
@@ -72,6 +73,11 @@ namespace Jellyfin.Server
             });
 
             services.AddJellyfinApi(_serverApplicationHost.GetApiPluginAssemblies(), _serverConfigurationManager.GetNetworkConfiguration());
+
+            // OpenID Connect login. Read and validated now, so a misconfiguration stops the server at startup
+            // instead of leaving it running with login in an unexpected state.
+            services.AddSingleton(OidcSettings.FromConfiguration(_configuration));
+            services.AddSingleton<OidcService>();
             services.AddJellyfinDbContext(_serverApplicationHost.ConfigurationManager, _configuration);
             services.AddJellyfinApiSwagger();
 

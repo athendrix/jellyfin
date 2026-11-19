@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Threading.Tasks;
+using Jellyfin.Api.Auth.Oidc;
 using Jellyfin.Api.Constants;
 using Jellyfin.Api.Extensions;
 using Jellyfin.Api.Helpers;
@@ -181,6 +182,7 @@ public class UserController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ApiExplorerSettings(IgnoreApi = true)]
     [Obsolete("Authenticate with username instead")]
+    [PasswordLogin]
     public async Task<ActionResult<AuthenticationResult>> AuthenticateUser(
         [FromRoute, Required] Guid userId,
         [FromQuery, Required] string pw)
@@ -209,6 +211,7 @@ public class UserController : BaseJellyfinApiController
     [HttpPost("AuthenticateByName")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [Tags("Authentication")]
+    [PasswordLogin]
     public async Task<ActionResult<AuthenticationResult>> AuthenticateUserByName([FromBody, Required] AuthenticateUserByName request)
     {
         var auth = await _authContext.GetAuthorizationInfo(Request).ConfigureAwait(false);
@@ -541,6 +544,7 @@ public class UserController : BaseJellyfinApiController
     [HttpPost("ForgotPassword")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [Tags("Authentication")]
+    [PasswordLogin]
     public async Task<ActionResult<ForgotPasswordResult>> ForgotPassword([FromBody, Required] ForgotPasswordDto forgotPasswordRequest)
     {
         var ip = HttpContext.GetNormalizedRemoteIP();
@@ -566,6 +570,7 @@ public class UserController : BaseJellyfinApiController
     [HttpPost("ForgotPassword/Pin")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [Tags("Authentication")]
+    [PasswordLogin]
     public async Task<ActionResult<PinRedeemResult>> ForgotPasswordPin([FromBody, Required] ForgotPasswordPinDto forgotPasswordPinRequest)
     {
         var result = await _userManager.RedeemPasswordResetPin(forgotPasswordPinRequest.Pin).ConfigureAwait(false);
